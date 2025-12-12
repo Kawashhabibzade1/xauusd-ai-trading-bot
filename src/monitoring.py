@@ -167,11 +167,12 @@ class TradingMonitor:
         if self.config['alerts']['console_enabled']:
             self._send_console_alert(alert)
         
-        # TODO: Implement email and Slack alerts
-        # if self.config['alerts']['email_enabled']:
-        #     self._send_email_alert(alert)
-        # if self.config['alerts']['slack_enabled']:
-        #     self._send_slack_alert(alert)
+        # Email and Slack alerts require implementation
+        if self.config['alerts'].get('email_enabled', False):
+            print(f"⚠️ Email alerts not yet implemented. Alert would be sent to: {self.config['alerts'].get('email_address')}")
+        
+        if self.config['alerts'].get('slack_enabled', False):
+            print(f"⚠️ Slack alerts not yet implemented. Alert would be sent to webhook.")
     
     def _send_console_alert(self, alert):
         """Print alert to console"""

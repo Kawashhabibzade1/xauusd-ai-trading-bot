@@ -89,8 +89,9 @@ for threshold in thresholds:
         else:  # SHORT (signal == 0)
             net_return = -forward_return - (SPREAD_PIPS / 20000)
         
-        # Fixed lot sizing: $2.50 per trade (5% of $50)
-        trade_pnl = net_return * 50000  # Approximate P&L
+        # Simplified P&L calculation (proportional to return)
+        # In production, use proper position sizing based on equity and risk %
+        trade_pnl = net_return * 50000  # Approximate P&L for comparison
         
         if trade_pnl > 0:
             wins += 1

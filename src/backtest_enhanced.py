@@ -31,6 +31,9 @@ RISK_PERCENT = 0.05
 SPREAD_PIPS = 2.5
 MAX_DRAWDOWN = 0.25  # 25% kill switch
 
+# Conversion constants for XAUUSD
+XAUUSD_PIP_VALUE = 20000  # Approximate conversion: return * 20000 ≈ USD P&L for XAUUSD
+
 # Time filters
 SESSION_START = time(13, 0)  # London-NY overlap starts at 13:00 UTC
 SESSION_END = time(16, 59)   # Ends at 16:59 UTC
@@ -160,15 +163,15 @@ for idx, row in df_trades.iterrows():
     
     # Calculate trade outcome
     if signal == 2:  # LONG
-        net_return = forward_return - (SPREAD_PIPS / 20000)
+        net_return = forward_return - (SPREAD_PIPS / XAUUSD_PIP_VALUE)
         direction = 'LONG'
     else:  # SHORT (signal == 0)
-        net_return = -forward_return - (SPREAD_PIPS / 20000)
+        net_return = -forward_return - (SPREAD_PIPS / XAUUSD_PIP_VALUE)
         direction = 'SHORT'
     
     # Position sizing: 5% risk
     position_size = equity * RISK_PERCENT
-    trade_pnl = net_return * 50000  # Approximate P&L
+    trade_pnl = net_return * XAUUSD_PIP_VALUE  # Convert return to USD P&L
     
     # Update equity
     equity += trade_pnl

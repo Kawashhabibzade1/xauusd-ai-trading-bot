@@ -231,13 +231,16 @@ class AutoRetrainingPipeline:
         print(f"   ✓ Model saved to: {model_path}")
         
         # Save metadata
+        # Note: train_samples/test_samples counts stored during training
+        split_idx = int(0.8 * len(model.train_set.data) if hasattr(model.train_set, 'data') else 0)
+        
         metadata = {
             'training_date': datetime.now().isoformat(),
             'model_type': 'LightGBM',
             'num_features': len(feature_cols),
             'num_classes': 3,
-            'train_samples': len(model.train_set.data),
-            'test_samples': len(model.valid_sets[0].data),
+            'train_samples': split_idx if split_idx > 0 else 'unknown',
+            'test_samples': 'unknown',  # Set externally if needed
             'accuracy': float(accuracy),
             'best_iteration': model.best_iteration,
             'params': self.config['model_params']

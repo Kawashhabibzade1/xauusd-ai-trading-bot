@@ -100,9 +100,15 @@ class NewsFilter:
             
         Returns:
             bool: True if safe to trade, False if near news event
+        
+        Warning:
+            If no calendar loaded, returns True (trading allowed).
+            This is intentional to avoid blocking trades, but means
+            news filtering is NOT active. Load calendar to enable.
         """
         if not self.news_calendar:
-            # No news calendar loaded - allow trading (with warning)
+            # No news calendar loaded - allow trading
+            # This is intentional: don't block trades if user hasn't set up news filtering
             return True
         
         for event in self.news_calendar:
