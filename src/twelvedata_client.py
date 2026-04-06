@@ -17,14 +17,15 @@ from pipeline_contract import display_path, ensure_parent_dir, resolve_repo_path
 
 DEFAULT_TWELVEDATA_ENV = "TWELVEDATA_API_KEY"
 BASE_URL = "https://api.twelvedata.com/time_series"
+DEFAULT_ENV_FILES = (".env", ".env.local")
 
 
-def resolve_api_key(env_name: str = DEFAULT_TWELVEDATA_ENV) -> str | None:
+def resolve_env_value(env_name: str) -> str | None:
     value = os.getenv(env_name, "").strip()
     if value:
         return value
 
-    for env_file in (".env", ".env.local"):
+    for env_file in DEFAULT_ENV_FILES:
         path = resolve_repo_path(env_file)
         if not path.exists():
             continue
@@ -39,6 +40,10 @@ def resolve_api_key(env_name: str = DEFAULT_TWELVEDATA_ENV) -> str | None:
             return cleaned or None
 
     return None
+
+
+def resolve_api_key(env_name: str = DEFAULT_TWELVEDATA_ENV) -> str | None:
+    return resolve_env_value(env_name)
 
 
 def fetch_time_series(

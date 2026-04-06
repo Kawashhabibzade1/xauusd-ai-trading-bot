@@ -1,8 +1,8 @@
 data:
   default_input: "data/live/xauusd_mt5_raw.csv"
   timezone: "UTC"
-  infer_volume_from_change_pips: true
-  source_preference: "mt5_local_preferred"
+  infer_volume_from_change_pips: false
+  source_preference: "mt5_export"
 
 sessions:
   asia_hours: [0, 1, 2, 3, 4, 5, 6, 7]
@@ -31,19 +31,19 @@ labels:
   entry_quality_window: 60
 
 walk_forward:
-  n_splits: 5
-  gap: 15
-  min_train_rows: 400
+  n_splits: 3
+  gap: 10
+  min_train_rows: 300
 
 baseline:
-  num_leaves: 31
-  learning_rate: 0.05
-  n_estimators: 150
+  num_leaves: 24
+  learning_rate: 0.06
+  n_estimators: 90
   subsample: 0.85
   colsample_bytree: 0.85
   random_state: 42
-  min_child_samples: 25
-  confidence_threshold: 0.58
+  min_child_samples: 20
+  confidence_threshold: 0.46
   class_weight: "balanced"
 
 neural:
@@ -61,9 +61,9 @@ neural:
   weight_decay: 0.0001
 
 ensemble:
-  baseline_weight: 0.60
-  neural_weight: 0.40
-  confidence_threshold: 0.58
+  baseline_weight: 1.00
+  neural_weight: 0.00
+  confidence_threshold: 0.46
   setup_score_weights:
     probability: 0.45
     confluence: 0.30
@@ -72,8 +72,8 @@ ensemble:
 
 trading:
   allowed_sessions: ["London", "New York", "Overlap"]
-  min_entry_quality: 0.35
-  min_setup_score: 0.58
+  min_entry_quality: 0.30
+  min_setup_score: 0.42
   paper:
     starting_equity: 100000.0
     risk_per_trade: 0.0025
@@ -81,3 +81,23 @@ trading:
     max_trades_per_day: 4
     daily_loss_streak_stop: 2
     max_holding_bars: 60
+
+learning:
+  batch_min_closed_trades: 30
+  batch_min_days: 5
+  batch_min_long_trades: 8
+  batch_min_short_trades: 8
+  max_single_session_share: 0.65
+  max_direction_share: 0.75
+  max_recent_trade_share: 0.50
+  recent_trade_window: 10
+
+promotion:
+  min_candidate_trades: 30
+  min_profit_factor: 1.10
+  min_precision: 0.52
+  min_expectancy_r: 0.05
+  max_drawdown: 0.08
+  require_profit_factor_delta: 0.05
+  max_precision_regression: 0.02
+  max_drawdown_delta: 0.02

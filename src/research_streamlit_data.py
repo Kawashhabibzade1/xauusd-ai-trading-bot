@@ -20,6 +20,13 @@ from pipeline_contract import (
     display_path,
     resolve_repo_path,
 )
+from mt5_client import fetch_recent_rates, load_exported_rates_csv
+from oanda_client import (
+    display_instrument,
+    fetch_instrument_candles,
+    normalize_oanda_instrument,
+    resolve_api_token as resolve_oanda_token,
+)
 from twelvedata_client import fetch_time_series, resolve_api_key
 
 
@@ -68,23 +75,95 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
 
 
 def load_live_market_snapshot(
+    provider: str = "auto",
     env_name: str = "TWELVEDATA_API_KEY",
+    oanda_env_name: str = "OANDA_API_TOKEN",
+    mt5_symbol: str = "XAUUSD",
     symbol: str = "XAU/USD",
     outputsize: int = 120,
 ) -> dict[str, Any]:
-    api_key = resolve_api_key(env_name)
-    if not api_key:
-        return {
-            "enabled": False,
-            "error": f"Environment variable {env_name} is not set.",
-        }
+    provider_value = provider.strip().lower()
+    payload: dict[str, Any] | None = None
+    selected_provider = provider_value
 
-    try:
-        payload = fetch_time_series(api_key=api_key, symbol=symbol, outputsize=outputsize)
-    except Exception as exc:
+    def try_mt5_payload() -> dict[str, Any] | None:
+        try:
+            return fetch_recent_rates(
+                symbol=mt5_symbol or symbol or "XAUUSD",
+                timeframe="M1",
+                count=outputsize,
+            )
+        except Exception:
+            try:
+                return load_exported_rates_csv(
+                    symbol=mt5_symbol or symbol or "XAUUSD",
+                    timeframe="M1",
+                )
+            except Exception:
+                return None
+
+    if provider_value in {"mt5", "mt5 local"}:
+        selected_provider = "mt5"
+        payload = try_mt5_payload()
+        if payload is None:
+            return {
+                "enabled": False,
+                "error": (
+                    "MT5 Local could not be reached. This provider works only on the same machine as a running "
+                    "MetaTrader terminal, either through the direct bridge or through the MT5 live exporter CSV."
+                ),
+            }
+    elif provider_value == "auto":
+        mt5_payload = try_mt5_payload()
+        if mt5_payload is not None:
+            selected_provider = "mt5"
+            payload = mt5_payload
+        elif resolve_oanda_token(oanda_env_name):
+            selected_provider = "oanda"
+        elif resolve_api_key(env_name):
+            selected_provider = "twelvedata"
+        else:
+            selected_provider = "twelvedata"
+
+    if selected_provider == "oanda":
+        api_token = resolve_oanda_token(oanda_env_name)
+        if not api_token:
+            return {
+                "enabled": False,
+                "error": f"Environment variable {oanda_env_name} is not set.",
+            }
+        instrument = normalize_oanda_instrument(symbol or "XAU_USD")
+        try:
+            payload = fetch_instrument_candles(
+                api_token=api_token,
+                instrument=instrument,
+                granularity="M1",
+                count=outputsize,
+            )
+        except Exception as exc:
+            return {
+                "enabled": False,
+                "error": str(exc),
+            }
+    elif selected_provider == "twelvedata":
+        api_key = resolve_api_key(env_name)
+        if not api_key:
+            return {
+                "enabled": False,
+                "error": f"Environment variable {env_name} is not set.",
+            }
+        td_symbol = (symbol or "XAU/USD").strip().upper().replace("_", "/")
+        try:
+            payload = fetch_time_series(api_key=api_key, symbol=td_symbol, outputsize=outputsize)
+        except Exception as exc:
+            return {
+                "enabled": False,
+                "error": str(exc),
+            }
+    elif selected_provider != "mt5":
         return {
             "enabled": False,
-            "error": str(exc),
+            "error": f"Unsupported live provider: {provider}",
         }
 
     values = payload["values"]
@@ -97,12 +176,25 @@ def load_live_market_snapshot(
     frame["datetime"] = pd.to_datetime(frame["datetime"])
     return {
         "enabled": True,
+        "provider": selected_provider,
         "meta": payload.get("meta", {}),
         "frame": frame,
         "latest": latest,
         "change": change,
         "change_pct": change_pct,
         "has_volume": payload.get("has_volume", False),
+        "volume_note": payload.get(
+            "volume_note",
+            "Source volume is available." if payload.get("has_volume", False) else "Source volume is not available.",
+        ),
+        "display_symbol": (
+            payload.get("meta", {}).get("symbol", mt5_symbol)
+            if selected_provider == "mt5"
+            else
+            display_instrument(payload.get("meta", {}).get("instrument", symbol))
+            if selected_provider == "oanda"
+            else payload.get("meta", {}).get("symbol", symbol)
+        ),
     }
 
 
@@ -441,6 +533,17 @@ def build_model_metric_table(report: dict[str, Any]) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows)
+
+
+def build_learning_checks_table(report: dict[str, Any]) -> pd.DataFrame:
+    learning = report.get("learning", {})
+    checks = learning.get("checks", [])
+    if not checks:
+        return pd.DataFrame()
+    frame = pd.DataFrame(checks)
+    if "passed" in frame.columns:
+        frame["passed"] = frame["passed"].map({True: "PASS", False: "BLOCK"})
+    return frame
 
 
 def build_walk_forward_table(report: dict[str, Any]) -> pd.DataFrame:

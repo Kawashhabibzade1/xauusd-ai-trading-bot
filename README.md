@@ -48,21 +48,185 @@ python src/serve_demo_ui.py
 
 Then open `http://127.0.0.1:4174` in your browser.
 
-If `TWELVEDATA_API_KEY` is set in your shell, the dashboard also shows a live `XAU/USD` market snapshot from Twelve Data. That live section is display-only because the `XAU/USD` feed does not include volume, while the local model pipeline expects volume-aware bars.
+If `OANDA_API_TOKEN`, `TWELVEDATA_API_KEY`, or a local MT5 terminal is available, the dashboard can also show a live `XAU/USD` market snapshot. MT5 Local is the best path for this project because it can provide local broker bars with `tick_volume`; OANDA is next-best, and Twelve Data remains the fallback display source.
 
 ```bash
 export TWELVEDATA_API_KEY=your_key_here
 python src/serve_demo_ui.py
 ```
 
-The Twelve Data helpers also fall back to a repo-local `.env` or `.env.local` file containing:
+The market-data helpers also fall back to a repo-local `.env` or `.env.local` file containing:
 ```bash
+OANDA_API_TOKEN=your_oanda_token_here
+OANDA_ENV=practice
 TWELVEDATA_API_KEY=your_key_here
+MT5_TERMINAL_PATH=/path/to/terminal64.exe
+MT5_LOGIN=12345678
+MT5_PASSWORD=your_password
+MT5_SERVER=your_broker_server
 ```
 
+You do not need to put MT5 credentials into the project if your MetaTrader terminal is already open and logged in locally. In that case, the MT5 live path can often attach to the running terminal directly.
+
 Important:
-- `Live Market Snapshot` uses current Twelve Data `XAU/USD` prices
-- `Sample Demo Prediction` still comes from the checked-in sample artifact and is not computed from the live Twelve Data feed
+- `Live Market Snapshot` can use MT5 Local, OANDA, or Twelve Data
+- `Auto` in the Streamlit cockpit now tries `MT5 Local` first when your terminal is running on the same machine
+- `MT5 Local` remains the preferred live provider when a local MetaTrader terminal is available
+- `Sample Demo Prediction` still comes from the checked-in sample artifact and is not computed from the live market feed
+
+## Live MT5 Mode
+
+Use this path if you want the repo to run on current bars from your local MetaTrader 5 terminal.
+
+```bash
+python src/install_mt5_exporter.py
+python src/run_live_mt5_pipeline.py
+```
+
+If your MT5 terminal is already open and logged in, no credentials are required in the command. The runner will try to connect to the local terminal first.
+
+If the direct `MetaTrader5` Python bridge is not available on your machine, the runner automatically falls back to the MT5 exporter CSV written by the bundled exporter EA.
+
+Optional environment variables:
+```bash
+MT5_TERMINAL_PATH=/path/to/terminal
+MT5_LOGIN=12345678
+MT5_PASSWORD=your_password
+MT5_SERVER=your_broker_server
+```
+
+MT5 live outputs are written separately:
+- `data/live/xauusd_mt5_raw.csv`
+- `data/live/mt5_processed/xauusd_m1_standardized.csv`
+- `data/live/mt5_processed/xauusd_m1_overlap.csv`
+- `data/live/mt5_processed/xauusd_features.csv`
+- `data/live/mt5_processed/xauusd_labeled.csv`
+- `python_training/models/live_mt5/`
+- `mt5_expert_advisor/Files/config/validation_set_mt5_live.csv`
+- `mt5_expert_advisor/Files/models/xauusd_ai_mt5_live.onnx`
+- `data/live/live_mt5_pipeline_report.json`
+
+Important caveat:
+- this path is local-only and depends on a MetaTrader terminal on the same machine
+- the Python `MetaTrader5` package is environment/platform dependent, so this path is intended for your local trading machine, not Streamlit Community Cloud
+- on macOS, the `MT5_Live_Data_Exporter.mq5` fallback is often the more reliable path
+- the exporter writes `xauusd_mt5_live.csv` into your local MT5 `MQL5/Files` folder, and the Python runner reads that file automatically
+- by default the pipeline uses `tick_volume` as the live `volume` field; `real_volume` can be preferred only when your broker/feed actually provides it
+
+## Local MT5 Paper Trading Stack
+
+Use this path if you want the whole project to work locally on your PC with:
+- live MT5 exporter data
+- a continuously refreshed local paper-trading worker
+- the Streamlit research cockpit
+
+Prerequisites:
+- desktop MetaTrader 5 is open on the same machine
+- `MT5_Live_Data_Exporter` is attached to a live `XAUUSD` or `XAUUSD-*` `M1` chart
+- `Algo Trading` is enabled
+
+Start everything:
+```bash
+./scripts/start_mt5_local_stack.sh
+```
+
+Then open:
+```text
+http://127.0.0.1:8502
+```
+
+Stop everything:
+```bash
+./scripts/stop_mt5_local_stack.sh
+```
+
+The local MT5 paper-trading stack writes its own cockpit artifacts here:
+- `data/live/research_mt5/xauusd_research_report.json`
+- `data/live/research_mt5/xauusd_research_predictions.csv`
+- `data/live/research_mt5/xauusd_paper_ledger.csv`
+- `data/live/research_mt5/xauusd_learning_feedback.csv`
+- `data/live/research_mt5/learning_status.json`
+- `data/live/research_mt5/xauusd_research_overlays.json`
+
+Important:
+- this is paper trading only; it does not place broker orders
+- the MT5 worker and the dashboard are local-runtime services, not Streamlit Cloud replacements
+- the top cards in the cockpit now follow the MT5 local report when `Live provider` is `MT5 Local` or `Auto`
+
+## Safe Learning Mode
+
+The local MT5 stack now separates:
+- `live scoring`
+- `paper-trade feedback capture`
+- `batch retraining readiness`
+- `model promotion`
+
+It does **not** retrain a neural net after every single paper trade. That would overfit very quickly.
+
+Instead, the project now writes:
+- `data/live/research_mt5/xauusd_learning_feedback.csv`
+  This stores the current signal context plus any realized paper-trade outcome.
+- `data/live/research_mt5/learning_status.json`
+  This tells you whether there is enough diverse feedback for safe batch retraining.
+
+Current learning safety checks include:
+- minimum closed trades
+- minimum number of trading days
+- minimum long and short trade counts
+- session concentration guard
+- direction concentration guard
+- recent-sample concentration guard
+
+Future candidate models should be checked with:
+```bash
+python src/evaluate_mt5_model_promotion.py --candidate-metrics path/to/candidate_metrics.json
+```
+
+The promotion gate only approves a candidate when it clears the configured floors for:
+- trade count
+- precision
+- profit factor
+- expectancy
+- drawdown
+
+and does not regress too far versus the current MT5 local baseline.
+
+## Live OANDA Mode
+
+Use this path if you want the repo to run on current OANDA `XAU_USD` candles instead of the checked-in sample CSV or the Twelve Data feed.
+
+```bash
+export OANDA_API_TOKEN=your_oanda_token_here
+export OANDA_ENV=practice
+python src/run_live_oanda_pipeline.py
+```
+
+This live mode fetches recent one-minute OANDA candles, writes them to `data/live/`, then runs:
+- standardization
+- overlap filtering
+- feature engineering
+- label creation
+- LightGBM training on the fetched window
+- confidence analysis
+- approximate backtest generation
+- MT5 validation fixture export
+- ONNX export
+
+OANDA live outputs are written separately from the Twelve Data variant:
+- `data/live/xauusd_oanda_raw.csv`
+- `data/live/oanda_processed/xauusd_m1_standardized.csv`
+- `data/live/oanda_processed/xauusd_m1_overlap.csv`
+- `data/live/oanda_processed/xauusd_features.csv`
+- `data/live/oanda_processed/xauusd_labeled.csv`
+- `python_training/models/live_oanda/`
+- `mt5_expert_advisor/Files/config/validation_set_oanda_live.csv`
+- `mt5_expert_advisor/Files/models/xauusd_ai_oanda_live.onnx`
+- `data/live/live_oanda_pipeline_report.json`
+
+Important caveat:
+- OANDA candle volume is the number of price updates in a candle, not centralized exchange gold volume
+- it is still materially better for this project than a no-volume spot feed because the current feature contract expects a live volume input
+- treat short-window retraining and backtest outputs as recent-window research, not as final proof of profitability
 
 Expected sample-data output on the checked-in repo state:
 - standardized rows: about `1380`
@@ -118,15 +282,17 @@ python src/run_live_twelvedata_pipeline.py --volume-mode constant
 
 ## Dashboard Modes
 
-The dashboard can now serve either the sample demo or the live Twelve Data pipeline.
+The dashboard can now serve the sample demo plus live market snapshots from MT5 Local, OANDA, or Twelve Data.
 
 Auto mode:
 ```bash
 python src/serve_demo_ui.py
 ```
 
-- if `TWELVEDATA_API_KEY` is set, the dashboard serves the live pipeline
-- otherwise it serves the checked-in sample demo
+- if `MT5 Local` is selected, the cockpit tries to pull directly from your running MetaTrader terminal
+- if `OANDA_API_TOKEN` is set, the cockpit can use OANDA for the live snapshot
+- otherwise it can still fall back to Twelve Data
+- if neither is set, it serves the checked-in sample demo only
 
 Force sample mode:
 ```bash
@@ -189,8 +355,8 @@ The cockpit is organized into five views:
 
 Important:
 - this cockpit is evaluation-first and not an auto-trader
-- Twelve Data is the operational v1 source for this profitability path
-- the productive baseline uses Twelve-Data-compatible **core features**; legacy volume-proxy fields stay research-only context and are not the required model edge
+- MT5 Local is the preferred live source when available on the same machine; OANDA is the next-best fallback, and Twelve Data remains the display-only fallback
+- the productive baseline uses API-compatible **core features**; legacy volume-proxy fields stay research-only context and are not the required model edge
 - `83%` is not treated as a guaranteed headline target; the system is designed to show real out-of-sample evidence, calibration, and expectancy instead of hiding weak regimes
 - if the neural stack is unavailable or disabled, the app and report stay on the LightGBM baseline and say so explicitly
 

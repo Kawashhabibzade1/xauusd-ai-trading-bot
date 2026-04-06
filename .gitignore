@@ -23,6 +23,14 @@ venv/
 # Logs
 logs/*.log
 *.log
+.logs/
+
+# Local live runtime artifacts
+data/live/
+mt5_expert_advisor/Files/config/*_live.json
+mt5_expert_advisor/Files/config/*_live.csv
+python_training/models/live_mt5/
+python_training/models/live_oanda/
 
 # IDE
 .vscode/

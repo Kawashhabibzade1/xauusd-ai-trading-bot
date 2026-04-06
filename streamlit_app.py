@@ -11,13 +11,18 @@ if str(SRC) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from pipeline_contract import DEFAULT_RESEARCH_REPORT_OUTPUT
+from pipeline_contract import (
+    DEFAULT_MT5_RESEARCH_REPORT_OUTPUT,
+    DEFAULT_RESEARCH_REPORT_OUTPUT,
+    resolve_repo_path,
+)
 from research_streamlit_data import (
     build_blocked_signal_table,
     build_calibration_figure,
     build_candlestick_figure,
     build_equity_curve_figure,
     build_hour_bias_figure,
+    build_learning_checks_table,
     build_model_metric_table,
     build_paper_ledger_table,
     build_probability_figure,
@@ -133,39 +138,90 @@ def cached_bundle(report_path: str) -> dict:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def cached_live_snapshot(symbol: str, outputsize: int, enabled: bool) -> dict:
+def cached_live_snapshot(provider: str, symbol: str, mt5_symbol: str, outputsize: int, enabled: bool) -> dict:
     if not enabled:
         return {"enabled": False, "error": "Live snapshot disabled in the sidebar."}
-    return load_live_market_snapshot(symbol=symbol, outputsize=outputsize)
+    return load_live_market_snapshot(provider=provider, symbol=symbol, mt5_symbol=mt5_symbol, outputsize=outputsize)
+
+
+def resolve_active_report_path(report_source: str, live_provider: str, custom_path: str) -> str:
+    if report_source == "Custom":
+        return custom_path.strip() or DEFAULT_RESEARCH_REPORT_OUTPUT
+    if report_source == "Research Baseline":
+        return DEFAULT_RESEARCH_REPORT_OUTPUT
+    if report_source == "MT5 Live Paper":
+        return DEFAULT_MT5_RESEARCH_REPORT_OUTPUT
+
+    mt5_report = resolve_repo_path(DEFAULT_MT5_RESEARCH_REPORT_OUTPUT)
+    if live_provider in {"Auto", "MT5 Local"} and mt5_report.exists():
+        return DEFAULT_MT5_RESEARCH_REPORT_OUTPUT
+    return DEFAULT_RESEARCH_REPORT_OUTPUT
 
 
 def sidebar_state() -> dict[str, object]:
     st.sidebar.markdown("## Research Control")
-    report_path = st.sidebar.text_input("Report path", value=DEFAULT_RESEARCH_REPORT_OUTPUT)
+    live_provider = st.sidebar.selectbox("Live provider", options=["Auto", "MT5 Local", "OANDA", "Twelve Data"], index=0)
+    report_source = st.sidebar.selectbox(
+        "Report source",
+        options=["Auto", "MT5 Live Paper", "Research Baseline", "Custom"],
+        index=0,
+        help="Auto prefers the MT5 live paper-trading report whenever MT5 Local is active and a local MT5 report exists.",
+    )
+    custom_default = DEFAULT_MT5_RESEARCH_REPORT_OUTPUT if live_provider in {"Auto", "MT5 Local"} else DEFAULT_RESEARCH_REPORT_OUTPUT
+    custom_report_path = (
+        st.sidebar.text_input("Custom report path", value=custom_default)
+        if report_source == "Custom"
+        else custom_default
+    )
+    report_path = resolve_active_report_path(report_source, live_provider, custom_report_path)
+    st.sidebar.caption(f"Active report: `{report_path}`")
     chart_bars = st.sidebar.slider("Chart bars", min_value=120, max_value=720, value=240, step=20)
     probability_bars = st.sidebar.slider("Probability bars", min_value=60, max_value=600, value=180, step=20)
-    live_enabled = st.sidebar.toggle("Load live Twelve Data snapshot", value=True)
-    live_symbol = st.sidebar.text_input("Live symbol", value="XAU/USD")
+    live_enabled = st.sidebar.toggle("Load live market snapshot", value=True)
+    if live_provider == "MT5 Local":
+        default_symbol = "XAUUSD"
+    elif live_provider == "OANDA":
+        default_symbol = "XAU_USD"
+    else:
+        default_symbol = "XAU/USD"
+    live_symbol = st.sidebar.text_input("Live symbol / instrument", value=default_symbol, key=f"live_symbol_{live_provider.lower().replace(' ', '_')}")
     live_window = st.sidebar.slider("Live snapshot bars", min_value=20, max_value=240, value=120, step=20)
     if st.sidebar.button("Refresh cached data"):
         st.cache_data.clear()
 
     st.sidebar.markdown("## Run Pipeline")
+    live_command = (
+        "python src/install_mt5_exporter.py\n"
+        "python src/run_mt5_research_pipeline.py --source-mode auto\n"
+        "python src/run_mt5_research_worker.py --poll-seconds 15"
+        if live_provider == "MT5 Local"
+        else
+        "python src/run_live_oanda_pipeline.py"
+        if live_provider == "OANDA"
+        else "python src/run_live_twelvedata_pipeline.py"
+    )
     st.sidebar.code(
-        "python src/research_pipeline.py --skip-neural --input data/live/xauusd_twelvedata_raw.csv",
+        live_command
+        if live_provider != "Auto"
+        else "python src/run_live_mt5_pipeline.py\npython src/run_live_oanda_pipeline.py\npython src/run_live_twelvedata_pipeline.py",
         language="bash",
     )
     st.sidebar.caption(
         "Install research extras first: pip install -r requirements-research.txt. "
-        "Ohne Torch bleibt das Cockpit auf der LightGBM-Baseline."
+        "Ohne Torch bleibt das Cockpit auf der LightGBM-Baseline. "
+        "Auto tries MT5 Local first when it is available on the same machine as a running MetaTrader terminal. "
+        "On macOS the MT5 exporter CSV fallback is often the most reliable path."
     )
 
     return {
         "report_path": report_path,
+        "report_source": report_source,
         "chart_bars": chart_bars,
         "probability_bars": probability_bars,
+        "live_provider": live_provider,
         "live_enabled": live_enabled,
         "live_symbol": live_symbol,
+        "mt5_symbol": live_symbol if live_provider == "MT5 Local" else "XAUUSD",
         "live_window": live_window,
     }
 
@@ -186,7 +242,9 @@ def load_page_state() -> tuple[dict, pd.DataFrame, pd.DataFrame, dict, dict]:
     report = bundle["report"]
     overlays = bundle["overlays"]
     live_snapshot = cached_live_snapshot(
+        str(settings["live_provider"]),
         str(settings["live_symbol"]),
+        str(settings["mt5_symbol"]),
         int(settings["live_window"]),
         bool(settings["live_enabled"]),
     )
@@ -196,6 +254,7 @@ def load_page_state() -> tuple[dict, pd.DataFrame, pd.DataFrame, dict, dict]:
 def render_header(report: dict) -> None:
     dataset_summary = report.get("dataset_summary", {})
     notes = report.get("notes", [])
+    mt5_live_source = report.get("mt5_live_source", {})
     st.markdown(
         """
         <div class="cockpit-hero">
@@ -210,6 +269,14 @@ def render_header(report: dict) -> None:
     )
     if notes:
         st.caption(" | ".join(notes))
+    if mt5_live_source:
+        st.caption(
+            "MT5 live source: "
+            f"{mt5_live_source.get('symbol', 'XAUUSD')} "
+            f"| provider {mt5_live_source.get('provider', 'mt5_export')} "
+            f"| rows {int(mt5_live_source.get('rows', 0)):,} "
+            f"| {mt5_live_source.get('start', 'n/a')} -> {mt5_live_source.get('end', 'n/a')}"
+        )
     st.caption(
         f"Rows: standardized {dataset_summary.get('standardized_rows', 0):,} | "
         f"research {dataset_summary.get('research_rows', 0):,} | "
@@ -223,6 +290,7 @@ def render_dashboard() -> None:
     settings, predictions, paper_ledger, report, overlay_bundle = load_page_state()
     live_snapshot = overlay_bundle["_live_snapshot"]
     latest = report.get("latest_signal", {})
+    learning = report.get("learning", {})
     render_header(report)
 
     top_cols = st.columns(6)
@@ -239,7 +307,7 @@ def render_dashboard() -> None:
     with top_cols[5]:
         render_metric_card("Paper Status", str(latest.get("paper_status", "N/A")), latest.get("paper_reason_blocked", ""))
 
-    risk_cols = st.columns(3)
+    risk_cols = st.columns(5)
     paper_summary = report.get("paper_trading", {})
     with risk_cols[0]:
         render_metric_card("Paper Trades", str(paper_summary.get("trade_count", 0)), "Closed trades")
@@ -247,6 +315,11 @@ def render_dashboard() -> None:
         render_metric_card("Profit Factor", f"{float(paper_summary.get('profit_factor', 0.0)):.2f}", "Paper ledger")
     with risk_cols[2]:
         render_metric_card("Max Drawdown", f"{float(paper_summary.get('max_drawdown', 0.0)):.1%}", "Risk ceiling")
+    with risk_cols[3]:
+        render_metric_card("Learning", "READY" if learning.get("retrain_ready") else "WAIT", f"{int(learning.get('closed_trades', 0))} closed trades")
+    with risk_cols[4]:
+        blockers = learning.get("retrain_blockers", [])
+        render_metric_card("Learning Gate", str(len(blockers)), "all checks passed" if not blockers else "|".join(blockers))
 
     live_col, signal_col = st.columns([1.0, 1.4])
     with live_col:
@@ -255,14 +328,12 @@ def render_dashboard() -> None:
             latest_live = live_snapshot["latest"]
             delta_text = f"{live_snapshot['change']:+.2f} ({live_snapshot['change_pct']:+.2f}%)"
             render_metric_card(
-                str(live_snapshot["meta"].get("symbol", "XAU/USD")),
+                str(live_snapshot.get("display_symbol") or live_snapshot["meta"].get("symbol", "XAU/USD")),
                 f"{float(latest_live['close']):.2f}",
                 f"{latest_live['datetime']} | {delta_text}",
             )
-            st.caption(
-                "Volume present in feed." if live_snapshot.get("has_volume") else
-                "No source volume in this feed. The productive baseline only uses Twelve-Data-compatible core features."
-            )
+            provider_name = str(live_snapshot.get("provider", "unknown")).replace("_", " ").title()
+            st.caption(f"Provider: {provider_name} | {live_snapshot.get('volume_note', '')}")
         else:
             st.warning(live_snapshot.get("error", "Live market snapshot unavailable."))
 
@@ -387,8 +458,26 @@ def render_model_lab() -> None:
     with metric_cols[2]:
         render_metric_card("Ensemble Status", str(ensemble.get("status", "unknown")), "Probability blend")
 
+    learning = report.get("learning", {})
+    learning_cols = st.columns(4)
+    with learning_cols[0]:
+        render_metric_card("Batch Retrain", "READY" if learning.get("retrain_ready") else "NOT READY", learning.get("recommended_action", "collect_more_feedback"))
+    with learning_cols[1]:
+        render_metric_card("Closed Trades", str(int(learning.get("closed_trades", 0))), f"{int(learning.get('trading_days', 0))} trading days")
+    with learning_cols[2]:
+        render_metric_card("Direction Mix", f"L {int(learning.get('long_trades', 0))} / S {int(learning.get('short_trades', 0))}", learning.get("dominant_direction", ""))
+    with learning_cols[3]:
+        render_metric_card("Session Concentration", f"{float(learning.get('dominant_session_share', 0.0)):.1%}", learning.get("dominant_session", ""))
+
     st.markdown("#### Baseline vs Neural Metrics")
     st.dataframe(build_model_metric_table(report), width="stretch", hide_index=True)
+
+    st.markdown("#### Safe Learning Checks")
+    learning_checks = build_learning_checks_table(report)
+    if learning_checks.empty:
+        st.info("No learning safety checks are available in the current report.")
+    else:
+        st.dataframe(learning_checks, width="stretch", hide_index=True)
 
     horizon = st.segmented_control("Calibration horizon", options=[5, 15, 60], default=15)
     st.plotly_chart(build_calibration_figure(report, horizon=int(horizon)), width="stretch")

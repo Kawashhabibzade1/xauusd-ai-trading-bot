@@ -1,0 +1,116 @@
+#property strict
+#property version   "1.00"
+#property description "Exports recent XAUUSD bars with volume into MQL5/Files/xauusd_mt5_live.csv for the local Python research pipeline."
+
+input string ExportFile = "xauusd_mt5_live.csv";
+input string ExpectedSymbol = "XAUUSD";
+input ENUM_TIMEFRAMES ExportTimeframe = PERIOD_M1;
+input int BarsToExport = 5000;
+input int RefreshSeconds = 15;
+input bool UseRealVolumeIfAvailable = false;
+
+datetime g_last_exported_bar = 0;
+bool g_symbol_warning_printed = false;
+
+bool SymbolMatchesExpected()
+{
+   string chart_symbol = _Symbol;
+   string expected_symbol = ExpectedSymbol;
+   StringToUpper(chart_symbol);
+   StringToUpper(expected_symbol);
+   return chart_symbol == expected_symbol || StringFind(chart_symbol, expected_symbol) >= 0;
+}
+
+bool EnsureExpectedSymbol()
+{
+   if(SymbolMatchesExpected())
+      return true;
+
+   if(!g_symbol_warning_printed)
+   {
+      Print("Exporter: attached to ", _Symbol, " but ExpectedSymbol is ", ExpectedSymbol, ". Export skipped until the EA is attached to the correct XAUUSD chart.");
+      g_symbol_warning_printed = true;
+   }
+   return false;
+}
+
+void ExportBars()
+{
+   if(!EnsureExpectedSymbol())
+      return;
+
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, ExportTimeframe, 0, BarsToExport, rates);
+   if(copied <= 0)
+   {
+      Print("Exporter: CopyRates failed for ", _Symbol, " error=", GetLastError());
+      return;
+   }
+
+   ArraySetAsSeries(rates, false);
+
+   int handle = FileOpen(ExportFile, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(handle == INVALID_HANDLE)
+   {
+      Print("Exporter: FileOpen failed for ", ExportFile, " error=", GetLastError());
+      return;
+   }
+
+   FileWrite(handle, "time", "open", "high", "low", "close", "volume");
+   for(int i = 0; i < copied; i++)
+   {
+      long volume_value = (long)rates[i].tick_volume;
+      if(UseRealVolumeIfAvailable && rates[i].real_volume > 0)
+         volume_value = (long)rates[i].real_volume;
+      string volume_text = (string)volume_value;
+
+      FileWrite(
+         handle,
+         TimeToString(rates[i].time, TIME_DATE | TIME_SECONDS),
+         DoubleToString(rates[i].open, _Digits),
+         DoubleToString(rates[i].high, _Digits),
+         DoubleToString(rates[i].low, _Digits),
+         DoubleToString(rates[i].close, _Digits),
+         volume_text
+      );
+   }
+
+   FileClose(handle);
+   g_last_exported_bar = rates[copied - 1].time;
+   Print("Exporter: wrote ", copied, " bars to ", ExportFile, " for ", _Symbol, " ", EnumToString(ExportTimeframe));
+}
+
+void MaybeExport()
+{
+   if(!EnsureExpectedSymbol())
+      return;
+
+   datetime latest_bar = iTime(_Symbol, ExportTimeframe, 0);
+   if(latest_bar == 0)
+      return;
+
+   if(g_last_exported_bar == 0 || latest_bar != g_last_exported_bar)
+      ExportBars();
+}
+
+int OnInit()
+{
+   EventSetTimer((int)MathMax(5, RefreshSeconds));
+   ExportBars();
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+}
+
+void OnTick()
+{
+   MaybeExport();
+}
+
+void OnTimer()
+{
+   MaybeExport();
+}
