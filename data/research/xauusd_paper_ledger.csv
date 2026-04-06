@@ -1,0 +1,1 @@
+trade_id,signal_time,entry_time,exit_time,direction,session_name,regime,entry_price,stop_loss,tp1,tp2,exit_price,exit_reason,tp1_hit,tp2_hit,setup_score,expected_value,entry_quality,realized_r,pnl_cash,equity_before,equity_after

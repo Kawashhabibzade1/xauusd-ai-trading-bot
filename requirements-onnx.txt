@@ -1,0 +1,5 @@
+# ONNX export and optional local runtime verification
+onnx>=1.16
+onnxmltools>=1.12
+skl2onnx>=1.17
+onnxruntime>=1.18

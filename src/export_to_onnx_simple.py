@@ -1,149 +1,134 @@
 """
-Export LightGBM model to ONNX format (simplified - no runtime test)
-Works with Python 3.14
+Canonical LightGBM -> ONNX exporter for MT5 validation mode.
 """
 
-import lightgbm as lgb
+from __future__ import annotations
+
+import argparse
 import json
-import os
+from pathlib import Path
 
-print("=" * 70)
-print("EXPORT LIGHTGBM MODEL TO ONNX")
-print("=" * 70)
-print()
+import lightgbm as lgb
 
-# Install required packages (run this first if needed)
-print("📦 Required packages:")
-print("   pip install onnx==1.16.0")
-print("   pip install onnxmltools==1.12.0")
-print("   pip install skl2onnx==1.17.0")
-print()
+from pipeline_contract import (
+    DEFAULT_FEATURE_CONFIG,
+    DEFAULT_FEATURE_LIST_PATH,
+    DEFAULT_MODEL_PATH,
+    DEFAULT_MT5_FEATURES_PATH,
+    DEFAULT_MT5_MODEL_CONFIG_PATH,
+    DEFAULT_MT5_ONNX_OUTPUT,
+    assert_ordered_features,
+    build_mt5_model_config,
+    display_path,
+    ensure_parent_dir,
+    resolve_repo_path,
+    write_feature_list,
+)
 
-try:
-    import onnxmltools
-    from onnxmltools.convert.common.data_types import FloatTensorType
-except ImportError:
-    print("❌ Missing packages! Run:")
-    print("   pip install onnx==1.16.0 onnxmltools==1.12.0 skl2onnx==1.17.0")
-    exit(1)
 
-# Load LightGBM model
-print("📥 Loading LightGBM model...")
-model = lgb.Booster(model_file='python_training/models/lightgbm_xauusd_v1.txt')
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", default=DEFAULT_MODEL_PATH, help="Trained LightGBM model path.")
+    parser.add_argument("--feature-list", default=DEFAULT_FEATURE_LIST_PATH, help="Feature list JSON path.")
+    parser.add_argument("--feature-config", default=DEFAULT_FEATURE_CONFIG, help="Feature contract YAML path.")
+    parser.add_argument("--output", default=DEFAULT_MT5_ONNX_OUTPUT, help="ONNX output path.")
+    parser.add_argument("--mt5-features-output", default=DEFAULT_MT5_FEATURES_PATH, help="MT5 feature list JSON output.")
+    parser.add_argument("--mt5-config-output", default=DEFAULT_MT5_MODEL_CONFIG_PATH, help="MT5 model config JSON output.")
+    parser.add_argument("--skip-runtime-check", action="store_true", help="Skip optional onnxruntime inference verification.")
+    return parser.parse_args()
 
-# Load feature list
-with open('python_training/models/feature_list.json', 'r') as f:
-    feature_cols = json.load(f)
 
-print(f"   Model: {model.num_trees()} trees")
-print(f"   Features: {len(feature_cols)}")
-print()
+def verify_runtime(onnx_path: Path, feature_count: int) -> None:
+    try:
+        import numpy as np
+        import onnxruntime as ort
+    except ImportError:
+        print("Skipping runtime verification because onnxruntime is not installed.")
+        return
 
-# Convert to ONNX
-print("🔄 Converting to ONNX...")
-initial_types = [('input', FloatTensorType([None, len(feature_cols)]))]
+    session = ort.InferenceSession(str(onnx_path))
+    test_input = np.random.randn(1, feature_count).astype("float32")
+    session.run(None, {session.get_inputs()[0].name: test_input})
 
-try:
-    onnx_model = onnxmltools.convert_lightgbm(
-        model,
-        initial_types=initial_types,
-        target_opset=12
+
+def export_model_to_onnx(
+    model_path: str = DEFAULT_MODEL_PATH,
+    feature_list_path: str = DEFAULT_FEATURE_LIST_PATH,
+    feature_config: str = DEFAULT_FEATURE_CONFIG,
+    output_path: str = DEFAULT_MT5_ONNX_OUTPUT,
+    mt5_features_output: str = DEFAULT_MT5_FEATURES_PATH,
+    mt5_config_output: str = DEFAULT_MT5_MODEL_CONFIG_PATH,
+    skip_runtime_check: bool = False,
+) -> dict:
+    try:
+        import onnxmltools
+        from onnxmltools.convert.common.data_types import FloatTensorType
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing ONNX export dependencies. Install requirements-onnx.txt before running the exporter."
+        ) from exc
+
+    with resolve_repo_path(feature_list_path).open("r", encoding="utf-8") as handle:
+        feature_columns = json.load(handle)
+    assert_ordered_features(feature_columns, feature_config, context="export feature list")
+
+    model = lgb.Booster(model_file=str(resolve_repo_path(model_path)))
+    initial_types = [("input", FloatTensorType([None, len(feature_columns)]))]
+    onnx_model = onnxmltools.convert_lightgbm(model, initial_types=initial_types, target_opset=12)
+
+    output_file = ensure_parent_dir(output_path)
+    with output_file.open("wb") as handle:
+        handle.write(onnx_model.SerializeToString())
+
+    write_feature_list(feature_columns, mt5_features_output)
+    config = build_mt5_model_config(
+        feature_columns,
+        model_filename=resolve_repo_path(output_path).name,
+        num_trees=model.num_trees(),
     )
-    print("   ✓ Conversion successful")
-except Exception as e:
-    print(f"   ❌ Conversion failed: {e}")
-    exit(1)
+    with ensure_parent_dir(mt5_config_output).open("w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
 
-print()
+    runtime_status = "skipped by flag"
+    if not skip_runtime_check:
+        verify_runtime(output_file, len(feature_columns))
+        runtime_status = "OK"
 
-# Save ONNX model
-onnx_path = 'mt5_expert_advisor/Files/models/xauusd_ai_v1.onnx'
-os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
+    return {
+        "feature_count": len(feature_columns),
+        "output_path": output_file,
+        "mt5_features_output": resolve_repo_path(mt5_features_output),
+        "mt5_config_output": resolve_repo_path(mt5_config_output),
+        "runtime_status": runtime_status,
+    }
 
-with open(onnx_path, 'wb') as f:
-    f.write(onnx_model.SerializeToString())
 
-file_size = os.path.getsize(onnx_path) / 1024
-print(f"💾 ONNX model saved:")
-print(f"   Path: {onnx_path}")
-print(f"   Size: {file_size:.1f} KB")
-print()
+def main() -> None:
+    args = parse_args()
+    print("=" * 70)
+    print("EXPORT LIGHTGBM MODEL TO ONNX")
+    print("=" * 70)
+    print(f"Model         : {display_path(args.model)}")
+    print(f"Feature list  : {display_path(args.feature_list)}")
+    print(f"ONNX output   : {display_path(args.output)}")
+    print()
 
-# Save feature list for MT5
-features_path = 'mt5_expert_advisor/Files/config/features.json'
-os.makedirs(os.path.dirname(features_path), exist_ok=True)
+    result = export_model_to_onnx(
+        model_path=args.model,
+        feature_list_path=args.feature_list,
+        feature_config=args.feature_config,
+        output_path=args.output,
+        mt5_features_output=args.mt5_features_output,
+        mt5_config_output=args.mt5_config_output,
+        skip_runtime_check=args.skip_runtime_check,
+    )
 
-with open(features_path, 'w') as f:
-    json.dump(feature_cols, f, indent=2)
+    print(f"Runtime verification: {result['runtime_status']}")
+    print(f"Feature count : {result['feature_count']}")
+    print(f"ONNX saved    : {display_path(result['output_path'])}")
+    print(f"MT5 features  : {display_path(result['mt5_features_output'])}")
+    print(f"MT5 config    : {display_path(result['mt5_config_output'])}")
 
-print(f"💾 Feature list saved:")
-print(f"   Path: {features_path}")
-print(f"   Features: {len(feature_cols)}")
-print()
 
-# Save model config
-config = {
-    'model_info': {
-        'file': 'xauusd_ai_v1.onnx',
-        'type': 'LightGBM',
-        'num_features': len(feature_cols),
-        'num_classes': 3,
-        'num_trees': model.num_trees()
-    },
-    'trading_config': {
-        'confidence_threshold': 0.55,
-        'min_confidence': 0.50,
-        'focus_signal': 'LONG',
-        'max_trades_per_day': 5
-    },
-    'performance': {
-        'baseline_accuracy': 0.475,
-        'confidence_50_accuracy': 0.582,
-        'confidence_55_accuracy': 0.633,
-        'confidence_60_accuracy': 0.724,
-        'long_accuracy_55': 0.834,
-        'long_accuracy_60': 0.886
-    },
-    'class_mapping': {
-        '0': 'SHORT',
-        '1': 'HOLD',
-        '2': 'LONG'
-    },
-    'usage_notes': [
-        'Use 55% confidence threshold for balanced trading',
-        'Use 60% confidence for conservative trading',
-        'LONG signals have 83% win rate at 55% confidence',
-        'Expected 4-5 trades per day at 55% threshold'
-    ]
-}
-
-config_path = 'mt5_expert_advisor/Files/config/model_config.json'
-with open(config_path, 'w') as f:
-    json.dump(config, f, indent=2)
-
-print(f"💾 Config saved:")
-print(f"   Path: {config_path}")
-print()
-
-print("=" * 70)
-print("✅ EXPORT COMPLETE!")
-print("=" * 70)
-print()
-print("📊 Summary:")
-print(f"   Model: LightGBM → ONNX")
-print(f"   Trees: {model.num_trees()}")
-print(f"   Features: {len(feature_cols)}")
-print(f"   Classes: 3 (SHORT/HOLD/LONG)")
-print(f"   File size: {file_size:.1f} KB")
-print()
-print("🎯 Recommended Settings:")
-print("   Confidence: 55%")
-print("   Win rate: 63% overall, 83% on LONG")
-print("   Trades/day: 4-5")
-print()
-print("📁 Files created:")
-print(f"   1. {onnx_path}")
-print(f"   2. {features_path}")
-print(f"   3. {config_path}")
-print()
-print("🚀 Next: Push to GitHub and start MT5 EA development!")
+if __name__ == "__main__":
+    main()

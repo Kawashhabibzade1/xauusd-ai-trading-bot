@@ -1,108 +1,83 @@
 """
-Create training labels for XAUUSD trading bot
-Labels: -1 (short), 0 (hold), +1 (long)
-Based on 15-minute forward returns
+Create 3-class training labels from engineered features using 15-minute forward returns.
 """
 
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+
 import numpy as np
+import pandas as pd
 
-print("=" * 70)
-print("CREATE TRAINING LABELS")
-print("=" * 70)
-print()
-
-# Load features
-print("📥 Loading feature data...")
-df = pd.read_csv('data/processed/xauusd_features.csv')
-df['time'] = pd.to_datetime(df['time'])
-
-print(f"   Rows: {len(df):,}")
-print(f"   Features: {len([c for c in df.columns if c not in ['time', 'open', 'high', 'low', 'close', 'volume']])}")
-print()
-
-# Compute forward returns
-print("🔧 Computing 15-minute forward returns...")
-df['forward_return_15m'] = df['close'].pct_change(15).shift(-15)
-
-print(f"   ✓ Forward return computed")
-print()
-
-# Create labels based on thresholds
-print("🏷️ Creating labels...")
-
-# Define thresholds (0.1% = 10 pips on XAUUSD ~$2000)
-# Adjust based on ATR
-threshold_buy = 0.0005   # 0.05% (buy if return > this)
-threshold_sell = -0.0005  # -0.05% (sell if return < this)
-
-df['label'] = np.where(
-    df['forward_return_15m'] > threshold_buy, 
-    1,  # Long
-    np.where(
-        df['forward_return_15m'] < threshold_sell,
-        -1,  # Short
-        0   # Hold
-    )
+from pipeline_contract import (
+    BASE_COLUMNS,
+    DEFAULT_FEATURE_CONFIG,
+    DEFAULT_FEATURE_OUTPUT,
+    DEFAULT_LABEL_OUTPUT,
+    assert_ordered_features,
+    display_path,
+    ensure_parent_dir,
+    resolve_repo_path,
 )
 
-# Remove rows with NaN labels (last 15 bars)
-df = df.dropna(subset=['forward_return_15m', 'label'])
 
-print(f"   Threshold (buy): {threshold_buy*100:.2f}%")
-print(f"   Threshold (sell): {threshold_sell*100:.2f}%")
-print()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", default=DEFAULT_FEATURE_OUTPUT, help="Feature CSV input.")
+    parser.add_argument("--output", default=DEFAULT_LABEL_OUTPUT, help="Labeled CSV output.")
+    parser.add_argument("--feature-config", default=DEFAULT_FEATURE_CONFIG, help="Feature contract YAML path.")
+    parser.add_argument("--buy-threshold", type=float, default=0.0005, help="Forward-return threshold for LONG.")
+    parser.add_argument("--sell-threshold", type=float, default=-0.0005, help="Forward-return threshold for SHORT.")
+    return parser.parse_args()
 
-# Label distribution
-print("📊 Label Distribution:")
-label_counts = df['label'].value_counts()
-for label in [-1, 0, 1]:
-    count = label_counts.get(label, 0)
-    pct = count / len(df) * 100
-    label_name = {-1: 'SHORT', 0: 'HOLD', 1: 'LONG'}[label]
-    print(f"   {label_name:5s} ({label:2d}): {count:,} samples ({pct:.1f}%)")
 
-print()
+def create_labeled_frame(
+    features: pd.DataFrame,
+    feature_config: str = DEFAULT_FEATURE_CONFIG,
+    buy_threshold: float = 0.0005,
+    sell_threshold: float = -0.0005,
+) -> pd.DataFrame:
+    labeled = features.copy()
+    labeled["time"] = pd.to_datetime(labeled["time"])
+    feature_columns = [column for column in labeled.columns if column not in BASE_COLUMNS]
+    assert_ordered_features(feature_columns, feature_config, context="label input features")
 
-# Check label balance
-short_pct = (df['label'] == -1).sum() / len(df) * 100
-long_pct = (df['label'] == 1).sum() / len(df) * 100
-hold_pct = (df['label'] == 0).sum() / len(df) * 100
+    labeled["forward_return_15m"] = labeled["close"].shift(-15).div(labeled["close"]) - 1.0
+    labeled["label"] = np.where(
+        labeled["forward_return_15m"] > buy_threshold,
+        1,
+        np.where(labeled["forward_return_15m"] < sell_threshold, -1, 0),
+    )
+    labeled = labeled.dropna(subset=["forward_return_15m"]).reset_index(drop=True)
+    return labeled
 
-print("⚖️ Label Balance:")
-if 30 <= short_pct <= 40 and 30 <= long_pct <= 40:
-    print("   ✅ Well-balanced (30-40% short, 30-40% long)")
-elif hold_pct > 50:
-    print("   ⚠️ Too many HOLD labels - consider adjusting thresholds")
-else:
-    print("   ✓ Acceptable balance")
-print()
 
-# Save labeled data
-output_file = 'data/processed/xauusd_labeled.csv'
-print(f"💾 Saving labeled data to: {output_file}")
+def main() -> None:
+    args = parse_args()
+    print("=" * 70)
+    print("CREATE TRAINING LABELS")
+    print("=" * 70)
+    print(f"Input : {display_path(args.input)}")
+    print(f"Output: {display_path(args.output)}")
+    print()
 
-df.to_csv(output_file, index=False)
+    features = pd.read_csv(resolve_repo_path(args.input))
+    labeled = create_labeled_frame(
+        features,
+        feature_config=args.feature_config,
+        buy_threshold=args.buy_threshold,
+        sell_threshold=args.sell_threshold,
+    )
 
-print(f"   Rows: {len(df):,}")
-print(f"   Columns: {len(df.columns)}")
-print()
+    output_path = ensure_parent_dir(args.output)
+    labeled.to_csv(output_path, index=False)
 
-# Show sample
-print("📋 Sample labeled data:")
-sample_cols = ['time', 'close', 'smc_quality_score', 'forward_return_15m', 'label']
-print(df[sample_cols].head(10).to_string(index=False))
+    distribution = labeled["label"].value_counts().sort_index().to_dict()
+    print(f"Rows              : {len(labeled):,}")
+    print(f"Thresholds        : buy>{args.buy_threshold:.4%}, sell<{args.sell_threshold:.4%}")
+    print(f"Class distribution: {distribution}")
+    print(f"Saved             : {display_path(output_path)}")
 
-print()
-print("=" * 70)
-print("✅ LABELS CREATED!")
-print("=" * 70)
-print()
-print("📊 Dataset Summary:")
-print(f"   Total samples: {len(df):,}")
-print(f"   Features: {len([c for c in df.columns if c not in ['time', 'open', 'high', 'low', 'close', 'volume', 'forward_return_15m', 'label']])}")
-print(f"   Labels: 3 classes (SHORT, HOLD, LONG)")
-print(f"   File: {output_file}")
-print()
-print("🎯 Next Step:")
-print("   Train baseline model: python train_lightgbm.py")
+
+if __name__ == "__main__":
+    main()

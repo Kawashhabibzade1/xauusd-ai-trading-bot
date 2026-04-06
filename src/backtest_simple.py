@@ -1,223 +1,162 @@
 """
-Simple backtesting simulation for XAUUSD AI Bot
-Simulates trades based on model predictions and confidence
+Approximate confidence-filtered signal simulation.
+
+This is not an executable trading backtest. It is a coarse classifier-to-signal
+simulation useful for relative comparisons only.
 """
 
-import pandas as pd
-import numpy as np
-import lightgbm as lgb
+from __future__ import annotations
+
+import argparse
 import json
 
-print("=" * 70)
-print("SIMPLE BACKTEST - XAUUSD AI BOT")
-print("=" * 70)
-print()
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
 
-# Configuration
-CONFIDENCE_THRESHOLD = 0.55  # 55% confidence
-INITIAL_CAPITAL = 50.0       # $50 starting capital
-RISK_PERCENT = 0.05          # 5% risk per trade
-SPREAD_PIPS = 2.5            # Average spread
-COMMISSION = 0.0             # No commission (prop firm)
+from pipeline_contract import (
+    DEFAULT_BACKTEST_RESULTS_PATH,
+    DEFAULT_FEATURE_CONFIG,
+    DEFAULT_FEATURE_LIST_PATH,
+    DEFAULT_LABEL_OUTPUT,
+    DEFAULT_MODEL_PATH,
+    LABEL_EXCLUDE_COLUMNS,
+    assert_ordered_features,
+    display_path,
+    ensure_parent_dir,
+    resolve_repo_path,
+)
 
-print("⚙️ Backtest Configuration:")
-print(f"   Initial Capital: ${INITIAL_CAPITAL}")
-print(f"   Risk per Trade: {RISK_PERCENT*100:.1f}%")
-print(f"   Confidence Threshold: {CONFIDENCE_THRESHOLD*100:.0f}%")
-print(f"   Spread: {SPREAD_PIPS} pips")
-print()
 
-# Load data
-print("📥 Loading test data...")
-df = pd.read_csv('data/processed/xauusd_labeled.csv')
-df['time'] = pd.to_datetime(df['time'])
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", default=DEFAULT_LABEL_OUTPUT, help="Labeled CSV input.")
+    parser.add_argument("--model", default=DEFAULT_MODEL_PATH, help="LightGBM model path.")
+    parser.add_argument("--feature-list", default=DEFAULT_FEATURE_LIST_PATH, help="Feature list JSON path.")
+    parser.add_argument("--feature-config", default=DEFAULT_FEATURE_CONFIG, help="Feature contract YAML path.")
+    parser.add_argument("--output", default=DEFAULT_BACKTEST_RESULTS_PATH, help="Approximate results JSON output.")
+    parser.add_argument("--confidence-threshold", type=float, default=0.55, help="Signal confidence threshold.")
+    parser.add_argument("--initial-capital", type=float, default=50.0, help="Initial equity for the simulation.")
+    return parser.parse_args()
 
-# Load model and features
-with open('python_training/models/feature_list.json', 'r') as f:
-    feature_cols = json.load(f)
 
-model = lgb.Booster(model_file='python_training/models/lightgbm_xauusd_v1.txt')
+def run_signal_simulation(
+    labeled: pd.DataFrame,
+    model_path: str = DEFAULT_MODEL_PATH,
+    feature_list_path: str = DEFAULT_FEATURE_LIST_PATH,
+    feature_config: str = DEFAULT_FEATURE_CONFIG,
+    confidence_threshold: float = 0.55,
+    initial_capital: float = 50.0,
+    output_path: str | None = None,
+) -> dict:
+    frame = labeled.copy()
+    frame["time"] = pd.to_datetime(frame["time"])
 
-# Use test set (last 20%)
-split_idx = int(0.8 * len(df))
-df_test = df.iloc[split_idx:].copy().reset_index(drop=True)
+    with resolve_repo_path(feature_list_path).open("r", encoding="utf-8") as handle:
+        feature_columns = json.load(handle)
+    assert_ordered_features(feature_columns, feature_config, context="feature list")
 
-print(f"   Test period: {df_test['time'].min().date()} → {df_test['time'].max().date()}")
-print(f"   Test bars: {len(df_test):,}")
-print()
+    data_feature_columns = [column for column in frame.columns if column not in LABEL_EXCLUDE_COLUMNS]
+    assert_ordered_features(data_feature_columns, feature_config, context="simulation input features")
 
-# Get predictions
-print("🔮 Running model predictions...")
-X_test = df_test[feature_cols].values
-y_pred_proba = model.predict(X_test)
-y_pred = np.argmax(y_pred_proba, axis=1)
-max_proba = np.max(y_pred_proba, axis=1)
+    model = lgb.Booster(model_file=str(resolve_repo_path(model_path)))
 
-df_test['pred_class'] = y_pred
-df_test['pred_confidence'] = max_proba
+    split_idx = int(0.8 * len(frame))
+    df_test = frame.iloc[split_idx:].copy().reset_index(drop=True)
+    if df_test.empty:
+        raise ValueError("Approximate simulation requires test rows after the train/test split.")
 
-print(f"   ✓ {len(df_test):,} predictions generated")
-print()
+    y_pred_proba = model.predict(df_test[feature_columns].values)
+    y_pred = np.argmax(y_pred_proba, axis=1)
+    max_proba = np.max(y_pred_proba, axis=1)
 
-# Filter by confidence
-df_trades = df_test[df_test['pred_confidence'] >= CONFIDENCE_THRESHOLD].copy()
+    df_test["pred_class"] = y_pred
+    df_test["pred_confidence"] = max_proba
+    df_trades = df_test.loc[df_test["pred_confidence"] >= confidence_threshold].copy()
 
-print(f"📊 High-Confidence Signals:")
-print(f"   Total: {len(df_trades):,} ({len(df_trades)/len(df_test)*100:.1f}% of test set)")
-print()
+    equity = initial_capital
+    equity_curve = [equity]
+    trades = []
 
-# Simulate trades
-print("💰 Simulating trades...")
+    for _, row in df_trades.iterrows():
+        signal = row["pred_class"]
+        if signal == 1:
+            equity_curve.append(equity)
+            continue
 
-trades = []
-equity = INITIAL_CAPITAL
-equity_curve = [INITIAL_CAPITAL]
-peak_equity = INITIAL_CAPITAL
-
-for idx, row in df_trades.iterrows():
-    signal = row['pred_class']  # 0=SHORT, 1=HOLD, 2=LONG
-    confidence = row['pred_confidence']
-    forward_return = row['forward_return_15m']
-    
-    # Skip HOLD signals
-    if signal == 1:
+        forward_return = row["forward_return_15m"]
+        net_return = forward_return if signal == 2 else -forward_return
+        pnl = 2.50 if net_return > 0 else -2.50
+        equity += pnl
         equity_curve.append(equity)
-        continue
-    
-    # Simulate trade outcome
-    # Use forward_return as proxy for trade result
-    
-    if signal == 2:  # LONG
-        # Deduct spread
-        net_return = forward_return - (SPREAD_PIPS / 20000)  # Approx spread impact
-        trade_result = 'WIN' if net_return > 0 else 'LOSS'
-        
-    elif signal == 0:  # SHORT
-        # Inverse return for short
-        net_return = -forward_return - (SPREAD_PIPS / 20000)
-        trade_result = 'WIN' if net_return > 0 else 'LOSS'
-    
-    # Fixed lot sizing: $2.50 per trade
-    pnl = 2.50 * (1 if trade_result == 'WIN' else -1)
-    
-    # Update equity
-    equity += pnl
-    equity_curve.append(equity)
-    
-    # Track peak for drawdown
-    if equity > peak_equity:
-        peak_equity = equity
-    
-    # Record trade
-    trades.append({
-        'time': row['time'],
-        'signal': 'LONG' if signal == 2 else 'SHORT',
-        'confidence': confidence,
-        'pnl': pnl,
-        'result': trade_result,
-        'equity': equity
-    })
+        trades.append(
+            {
+                "time": str(row["time"]),
+                "signal": "LONG" if signal == 2 else "SHORT",
+                "confidence": float(row["pred_confidence"]),
+                "pnl": pnl,
+            }
+        )
 
-trades_df = pd.DataFrame(trades)
+    trades_df = pd.DataFrame(trades)
+    total_trades = len(trades_df)
+    winning_trades = int((trades_df["pnl"] > 0).sum()) if total_trades else 0
+    gross_profit = float(trades_df.loc[trades_df["pnl"] > 0, "pnl"].sum()) if total_trades else 0.0
+    gross_loss = float(abs(trades_df.loc[trades_df["pnl"] <= 0, "pnl"].sum())) if total_trades else 0.0
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
+    equity_series = pd.Series(equity_curve)
+    max_drawdown = float(((equity_series - equity_series.cummax()) / equity_series.cummax()).min()) if len(equity_series) else 0.0
 
-print(f"   ✓ {len(trades_df):,} trades executed")
-print()
-
-# Calculate metrics
-print("=" * 70)
-print("📈 BACKTEST RESULTS")
-print("=" * 70)
-print()
-
-# Basic stats
-total_trades = len(trades_df)
-winning_trades = (trades_df['pnl'] > 0).sum()
-losing_trades = (trades_df['pnl'] <= 0).sum()
-win_rate = winning_trades / total_trades if total_trades > 0 else 0
-
-gross_profit = trades_df[trades_df['pnl'] > 0]['pnl'].sum()
-gross_loss = abs(trades_df[trades_df['pnl'] <= 0]['pnl'].sum())
-net_profit = trades_df['pnl'].sum()
-profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
-
-# Drawdown
-equity_series = pd.Series(equity_curve)
-running_max = equity_series.cummax()
-drawdown = (equity_series - running_max) / running_max
-max_drawdown = drawdown.min()
-
-print(f"💼 Trading Performance:")
-print(f"   Total Trades: {total_trades}")
-print(f"   Winning Trades: {winning_trades} ({win_rate*100:.1f}%)")
-print(f"   Losing Trades: {losing_trades} ({(1-win_rate)*100:.1f}%)")
-print()
-
-print(f"💰 Financial Results:")
-print(f"   Starting Capital: ${INITIAL_CAPITAL:.2f}")
-print(f"   Ending Capital: ${equity:.2f}")
-print(f"   Net Profit: ${net_profit:.2f} ({(net_profit/INITIAL_CAPITAL)*100:.1f}%)")
-print(f"   Gross Profit: ${gross_profit:.2f}")
-print(f"   Gross Loss: ${gross_loss:.2f}")
-print(f"   Profit Factor: {profit_factor:.2f}")
-print()
-
-print(f"📊 Risk Metrics:")
-print(f"   Max Drawdown: {max_drawdown*100:.1f}%")
-print(f"   Peak Equity: ${peak_equity:.2f}")
-print()
-
-# Per-signal performance
-print(f"📊 Performance by Signal:")
-for signal_type in ['LONG', 'SHORT']:
-    signal_trades = trades_df[trades_df['signal'] == signal_type]
-    if len(signal_trades) > 0:
-        sig_wins = (signal_trades['pnl'] > 0).sum()
-        sig_wr = sig_wins / len(signal_trades)
-        sig_pnl = signal_trades['pnl'].sum()
-        print(f"   {signal_type:5s}: {len(signal_trades):3d} trades, WR: {sig_wr*100:.1f}%, P&L: ${sig_pnl:+.2f}")
-print()
-
-# Daily performance
-trades_df['date'] = trades_df['time'].dt.date
-daily_pnl = trades_df.groupby('date')['pnl'].sum()
-
-print(f"📅 Time Analysis:")
-print(f"   Trading Days: {len(daily_pnl)}")
-print(f"   Avg Trades/Day: {total_trades / len(daily_pnl):.1f}")
-print(f"   Best Day: ${daily_pnl.max():.2f}")
-print(f"   Worst Day: ${daily_pnl.min():.2f}")
-print()
-
-print("=" * 70)
-print("✅ BACKTEST COMPLETE!")
-print("=" * 70)
-print()
-
-print("🎯 Summary:")
-print(f"   Win Rate: {win_rate*100:.1f}%")
-print(f"   Profit Factor: {profit_factor:.2f}")
-print(f"   Return: {(net_profit/INITIAL_CAPITAL)*100:.1f}%")
-print(f"   Max DD: {max_drawdown*100:.1f}%")
-print()
-
-# Save results
-results = {
-    'config': {
-        'confidence_threshold': CONFIDENCE_THRESHOLD,
-        'initial_capital': INITIAL_CAPITAL,
-        'risk_percent': RISK_PERCENT
-    },
-    'performance': {
-        'total_trades': int(total_trades),
-        'win_rate': float(win_rate),
-        'profit_factor': float(profit_factor),
-        'net_profit': float(net_profit),
-        'return_percent': float((net_profit/INITIAL_CAPITAL)*100),
-        'max_drawdown': float(max_drawdown*100)
+    results = {
+        "simulation_type": "approximate_non_executable",
+        "config": {
+            "confidence_threshold": float(confidence_threshold),
+            "initial_capital": float(initial_capital),
+        },
+        "signals_retained": int(len(df_trades)),
+        "performance": {
+            "total_trades": total_trades,
+            "win_rate": float(winning_trades / total_trades) if total_trades else 0.0,
+            "profit_factor": float(profit_factor),
+            "ending_equity": float(equity),
+            "return_percent": float(((equity - initial_capital) / initial_capital) * 100.0),
+            "max_drawdown": max_drawdown * 100.0,
+        },
     }
-}
 
-with open('python_training/models/backtest_results.json', 'w') as f:
-    json.dump(results, f, indent=2)
+    if output_path:
+        output_file = ensure_parent_dir(output_path)
+        with output_file.open("w", encoding="utf-8") as handle:
+            json.dump(results, handle, indent=2)
+        results["output_path"] = str(output_file)
 
-print("💾 Results saved to: python_training/models/backtest_results.json")
+    return results
+
+
+def main() -> None:
+    args = parse_args()
+    print("=" * 70)
+    print("APPROXIMATE SIGNAL SIMULATION")
+    print("=" * 70)
+    print("This output is not a trading-grade backtest.")
+    print()
+
+    labeled = pd.read_csv(resolve_repo_path(args.input))
+    results = run_signal_simulation(
+        labeled=labeled,
+        model_path=args.model,
+        feature_list_path=args.feature_list,
+        feature_config=args.feature_config,
+        confidence_threshold=args.confidence_threshold,
+        initial_capital=args.initial_capital,
+        output_path=args.output,
+    )
+
+    print(f"Signals retained : {results['signals_retained']:,}")
+    print(f"Trades simulated : {results['performance']['total_trades']:,}")
+    print(f"Ending equity    : {results['performance']['ending_equity']:.2f}")
+    print(f"Approx result    : {display_path(args.output)}")
+
+
+if __name__ == "__main__":
+    main()

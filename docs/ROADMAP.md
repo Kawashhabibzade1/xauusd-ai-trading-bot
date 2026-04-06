@@ -1,47 +1,29 @@
 # Development Roadmap
 
-## Phase 1: Data Acquisition (Week 1)
-- [x] Setup project structure
-- [x] Download 5 years XAUUSD M1 data
-- [x] Validate data quality
-- [x] Filter London-NY overlap
+## Phase 1: Contract And Data
+- [x] Canonical raw dataset selected: `data/xauusd_m1_2022_2025.csv`
+- [x] Standardization path moved to `data/processed/xauusd_m1_standardized.csv`
+- [x] London-NY overlap filter standardized
+- [x] 68-feature contract captured in `python_training/config/features.yaml`
 
-## Phase 2: Feature Engineering (Week 1-2)
-- [x] Implement 61 feature pipeline
-- [x] Verify feature calculations
-- [x] Create training labels
+## Phase 2: Python Training Pipeline
+- [x] Feature engineering script aligned to the 68-feature contract
+- [x] Label creation aligned to the shared contract
+- [x] LightGBM training aligned to the shared contract
+- [x] Confidence analysis no longer crashes on fallback
+- [x] Approximate simulation explicitly marked as non-executable
 
-## Phase 3: Model Training (Week 2-3)
-- [ ] Train LightGBM classifier
-- [ ] Train PyTorch hybrid model
-- [ ] Train PPO RL agent
-- [ ] Create ensemble meta-learner
+## Phase 3: MT5 Validation Integration
+- [x] Feature engine expanded to 68 features
+- [x] Validation-mode EA inputs added
+- [x] ONNX model path standardized
+- [x] Signal logging added
+- [x] Validation fixture export added
+- [ ] Compile and run parity checks in MT5
 
-## Phase 4: ONNX Export (Week 3)
-- [ ] Export to ONNX format
-- [ ] Validate ONNX inference
-- [ ] Test feature parity (Python vs ONNX)
-
-## Phase 5: Backtesting (Week 4)
-- [ ] Python tick-level backtest (3 years)
-- [ ] MT5 Strategy Tester validation
-- [ ] Walk-forward analysis
-- [ ] Monte Carlo stress tests
-
-## Phase 6: MT5 EA Development (Week 5)
-- [ ] Write MQL5 EA code
-- [ ] Implement dual-mode (Validation/ML)
-- [ ] Add risk management
-- [ ] Compile and test on demo
-
-## Phase 7: Shadow Testing (Week 6-9)
-- [ ] 30-day paper trading
-- [ ] Performance monitoring
-- [ ] Model validation
-- [ ] Emergency procedures tested
-
-## Phase 8: Live Deployment (Week 10+)
-- [ ] Deploy with $50 capital
-- [ ] Conservative config (5% risk)
-- [ ] Daily monitoring
-- [ ] Performance review
+## Phase 4: Deferred Until Parity Is Proven
+- [ ] Order execution
+- [ ] Risk management module
+- [ ] Strategy Tester validation
+- [ ] Shadow trading
+- [ ] Live deployment

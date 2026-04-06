@@ -69,7 +69,7 @@ Industrial-grade MT5 trading bot using hybrid ML/RL architecture.
 - [x] Project structure created
 - [ ] Data downloaded (2020-2025)
 - [ ] Data filtered (London-NY overlap)
-- [ ] Features engineered (60 features)
+- [ ] Features engineered (68 features)
 - [ ] Model trained (LightGBM + PyTorch)
 - [ ] ONNX exported
 - [ ] MT5 EA compiled
@@ -178,7 +178,7 @@ model_type: "custom"  # Options: custom, transfer_sspt, ensemble
 
 custom:
   architecture: "hybrid_3head"
-  input_dim: 60
+  input_dim: 68
   hidden_dim: 128
   dropout: 0.2
 
@@ -244,7 +244,7 @@ time_features:
 - [ ] Filter London-NY overlap
 
 ## Phase 2: Feature Engineering (Week 1-2)
-- [ ] Implement 60 feature pipeline
+- [ ] Implement 68 feature pipeline
 - [ ] Verify feature calculations
 - [ ] Create training labels
 

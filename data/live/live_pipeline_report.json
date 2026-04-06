@@ -1,0 +1,166 @@
+{
+  "mode": "live_twelvedata",
+  "symbol": "XAU/USD",
+  "interval": "1min",
+  "source_timezone": "UTC",
+  "source_rows": 5000,
+  "source_start": "2026-04-02 11:18:00",
+  "source_end": "2026-04-05 22:37:00",
+  "source_has_volume": false,
+  "synthesized_volume": true,
+  "volume_mode": "range_proxy",
+  "standardized_rows": 5000,
+  "standardized_start": "2026-04-02 11:18:00",
+  "standardized_end": "2026-04-05 22:37:00",
+  "overlap_rows": 480,
+  "overlap_start": "2026-04-02 13:00:00",
+  "overlap_end": "2026-04-03 16:59:00",
+  "feature_rows": 241,
+  "feature_time": "2026-04-03 16:59:00",
+  "labeled_rows": 226,
+  "validation_rows": 100,
+  "runtime_status": "skipped by flag",
+  "prediction": {
+    "time": "2026-04-03 16:59:00",
+    "label": "HOLD",
+    "prob_short": 0.0,
+    "prob_hold": 0.9999738805,
+    "prob_long": 2.61195e-05
+  },
+  "training": {
+    "accuracy": 1.0,
+    "best_iteration": 115,
+    "train_samples": 180,
+    "test_samples": 46
+  },
+  "confidence": {
+    "test_samples": 46,
+    "threshold_results": [
+      {
+        "threshold": 0.4,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.45,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.5,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.55,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.6,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.65,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.7,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.75,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      },
+      {
+        "threshold": 0.8,
+        "samples": 46,
+        "accuracy": 1.0,
+        "pct_total": 100.0,
+        "short_acc": 0.0,
+        "hold_acc": 1.0,
+        "long_acc": 0.0
+      }
+    ],
+    "selected_threshold": 0.4,
+    "selected_accuracy": 1.0,
+    "selected_retained_pct": 100.0,
+    "selection_reason": "target_met",
+    "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         0\n        HOLD      1.000     1.000     1.000        46\n        LONG      0.000     0.000     0.000         0\n\n    accuracy                          1.000        46\n   macro avg      0.333     0.333     0.333        46\nweighted avg      1.000     1.000     1.000        46\n"
+  },
+  "backtest": {
+    "simulation_type": "approximate_non_executable",
+    "config": {
+      "confidence_threshold": 0.55,
+      "initial_capital": 50.0
+    },
+    "signals_retained": 46,
+    "performance": {
+      "total_trades": 0,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "ending_equity": 50.0,
+      "return_percent": 0.0,
+      "max_drawdown": 0.0
+    },
+    "output_path": "/Volumes/kawash/Zainnuddin/newbot2026.04/xauusd-ai-trading-bot/python_training/models/live_twelvedata/backtest_results.json"
+  },
+  "artifacts": {
+    "raw_output": "data/live/xauusd_twelvedata_raw.csv",
+    "standardized_output": "data/live/processed/xauusd_m1_standardized.csv",
+    "overlap_output": "data/live/processed/xauusd_m1_overlap.csv",
+    "feature_output": "data/live/processed/xauusd_features.csv",
+    "label_output": "data/live/processed/xauusd_labeled.csv",
+    "model_output": "python_training/models/live_twelvedata/lightgbm_xauusd_live.txt",
+    "feature_list_output": "python_training/models/live_twelvedata/feature_list.json",
+    "metadata_output": "python_training/models/live_twelvedata/model_metadata.json",
+    "confidence_output": "python_training/models/live_twelvedata/confidence_analysis.json",
+    "backtest_output": "python_training/models/live_twelvedata/backtest_results.json",
+    "validation_output": "mt5_expert_advisor/Files/config/validation_set_live.csv",
+    "onnx_output": "mt5_expert_advisor/Files/models/xauusd_ai_live.onnx",
+    "mt5_features_output": "mt5_expert_advisor/Files/config/features_live.json",
+    "mt5_config_output": "mt5_expert_advisor/Files/config/model_config_live.json",
+    "report_output": "data/live/live_pipeline_report.json"
+  },
+  "notes": [
+    "This live path is experimental.",
+    "Twelve Data XAU/USD bars do not include volume, so the pipeline synthesized volume before feature engineering.",
+    "Training, confidence analysis, and backtest outputs come from the recent fetched window only, not from the full historical dataset originally envisioned by the project."
+  ]
+}

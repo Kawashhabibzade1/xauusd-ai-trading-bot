@@ -1,133 +1,76 @@
 """
-Filter XAUUSD data for London-NY overlap window (13:00-16:59 UTC)
-Extracts only the highest liquidity trading hours
+Filter standardized XAUUSD data for the London-NY overlap window (13:00-16:59 UTC).
 """
 
-import pandas as pd
-import numpy as np
+from __future__ import annotations
 
-def filter_london_ny_overlap():
-    """
-    Filter standardized data for London-NY overlap hours.
-    """
-    
-    print("=" * 70)
-    print("FILTER FOR LONDON-NY OVERLAP (13:00-16:59 UTC)")
-    print("=" * 70)
-    print()
-    
-    # Load standardized file
-    input_file = 'data/raw/xauusd_m1_standardized.csv'
-    print(f"📥 Loading: {input_file}")
-    
-    df = pd.read_csv(input_file)
-    df['time'] = pd.to_datetime(df['time'])
-    
-    print(f"   Total rows: {len(df):,}")
-    print(f"   Date range: {df['time'].min().date()} → {df['time'].max().date()}")
-    print()
-    
-    # Extract hour
-    df['hour'] = df['time'].dt.hour
-    df['dayofweek'] = df['time'].dt.dayofweek
-    
-    # Filter for overlap window (13:00-16:59 UTC)
-    print("🔧 Applying overlap filter...")
-    print("   Target hours: 13:00-16:59 UTC")
-    print("   Target days: Monday-Friday (0-4)")
-    print()
-    
-    overlap_df = df[
-        (df['hour'] >= 13) & (df['hour'] < 17) &  # 13:00-16:59 UTC
-        (df['dayofweek'] < 5)  # Monday-Friday only
+import argparse
+
+import pandas as pd
+
+from pipeline_contract import (
+    DEFAULT_OVERLAP_OUTPUT,
+    DEFAULT_STANDARDIZED_OUTPUT,
+    display_path,
+    ensure_parent_dir,
+    resolve_repo_path,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", default=DEFAULT_STANDARDIZED_OUTPUT, help="Standardized OHLCV CSV input.")
+    parser.add_argument("--output", default=DEFAULT_OVERLAP_OUTPUT, help="Filtered overlap CSV output.")
+    return parser.parse_args()
+
+
+def filter_overlap_frame(df: pd.DataFrame) -> pd.DataFrame:
+    frame = df.copy()
+    frame["time"] = pd.to_datetime(frame["time"])
+    frame["hour"] = frame["time"].dt.hour
+    frame["dayofweek"] = frame["time"].dt.dayofweek
+
+    overlap = frame.loc[
+        frame["dayofweek"].lt(5) & frame["hour"].between(13, 16, inclusive="both"),
+        ["time", "open", "high", "low", "close", "volume"],
     ].copy()
-    
-    # Remove weekend data
-    original_count = len(overlap_df)
-    overlap_df = overlap_df[overlap_df['dayofweek'] < 5]
-    weekends_removed = original_count - len(overlap_df)
-    
-    print(f"📊 Filtering Results:")
-    print(f"   Original bars: {len(df):,}")
-    print(f"   Overlap bars: {len(overlap_df):,}")
-    print(f"   Reduction: {(1 - len(overlap_df)/len(df))*100:.1f}%")
-    print(f"   Weekends removed: {weekends_removed:,}")
-    print()
-    
-    # Verify hour distribution
-    print("⏰ Hour Distribution (should only be 13-16):")
-    hour_counts = overlap_df['hour'].value_counts().sort_index()
-    for hour, count in hour_counts.items():
-        print(f"   {hour:02d}:00 - {count:,} bars")
-    print()
-    
-    # Calculate bars per day
-    total_days = (overlap_df['time'].max() - overlap_df['time'].min()).days
-    avg_bars_per_day = len(overlap_df) / total_days
-    print(f"📈 Statistics:")
-    print(f"   Trading days: ~{total_days}")
-    print(f"   Avg bars/day: {avg_bars_per_day:.0f} (expected: 240)")
-    print()
-    
-    # Session volatility analysis
-    print("💹 Volatility Analysis:")
-    overlap_df['price_range'] = overlap_df['high'] - overlap_df['low']
-    
-    print(f"   Avg 1-min range: ${overlap_df['price_range'].mean():.2f}")
-    print(f"   Max 1-min range: ${overlap_df['price_range'].max():.2f}")
-    print(f"   Avg volume: {overlap_df['volume'].mean():.5f}")
-    print()
-    
-    # Data quality checks on filtered data
-    print("✅ Filtered Data Quality:")
-    
-    # Check for zeros (market closed during overlap = suspicious)
-    zero_volume = (overlap_df['volume'] == 0).sum()
-    flat_prices = (overlap_df['price_range'] == 0).sum()
-    
-    print(f"   Zero volume bars: {zero_volume:,} ({zero_volume/len(overlap_df)*100:.1f}%)")
-    print(f"   Flat price bars: {flat_prices:,} ({flat_prices/len(overlap_df)*100:.1f}%)")
-    
-    if zero_volume / len(overlap_df) > 0.10:
-        print(f"   ⚠️  High zero-volume rate (>10%) - some holidays included")
-    
-    print()
-    
-    # Save filtered data
-    output_file = 'data/processed/xauusd_m1_overlap.csv'
-    print(f"💾 Saving filtered data...")
-    
-    # Keep only essential columns
-    overlap_df = overlap_df[['time', 'open', 'high', 'low', 'close', 'volume']].copy()
-    overlap_df.to_csv(output_file, index=False)
-    
-    print(f"   Output: {output_file}")
-    print(f"   Rows: {len(overlap_df):,}")
-    print(f"   Size: {overlap_df.memory_usage(deep=True).sum() / (1024**2):.1f} MB")
-    print()
-    
-    # Show sample
-    print("📋 Sample filtered data (first 10 rows):")
-    print(overlap_df.head(10).to_string(index=False))
-    print()
-    
-    # Summary
+
+    if overlap.empty:
+        raise ValueError("Overlap filter removed all rows; input or time parsing is wrong.")
+
+    hours = sorted(overlap["time"].dt.hour.unique().tolist())
+    if hours != [13, 14, 15, 16]:
+        raise ValueError(f"Filtered output contains unexpected UTC hours: {hours}")
+    if overlap["time"].dt.dayofweek.ge(5).any():
+        raise ValueError("Filtered output still contains weekend rows.")
+
+    return overlap.reset_index(drop=True)
+
+
+def main() -> None:
+    args = parse_args()
     print("=" * 70)
-    print("✅ OVERLAP FILTERING COMPLETE!")
+    print("FILTER LONDON-NY OVERLAP")
     print("=" * 70)
+    print(f"Input : {display_path(args.input)}")
+    print(f"Output: {display_path(args.output)}")
     print()
-    print("📊 Final Dataset:")
-    print(f"   Total bars: {len(overlap_df):,}")
-    print(f"   Date range: {overlap_df['time'].min().date()} → {overlap_df['time'].max().date()}")
-    print(f"   Hours: 13:00-16:59 UTC (London-NY overlap)")
-    print(f"   Days: Monday-Friday only")
-    print(f"   File: {output_file}")
-    print()
-    print("🎯 Next Step:")
-    print("   Run: python feature_engineering.py")
-    print("   This will compute 60 features from overlap data")
-    
-    return True
+
+    input_path = resolve_repo_path(args.input)
+    df = pd.read_csv(input_path)
+    overlap = filter_overlap_frame(df)
+
+    bars_per_day = overlap.groupby(overlap["time"].dt.date).size()
+    representative = int(bars_per_day.mode().iloc[0]) if not bars_per_day.empty else 0
+
+    output_path = ensure_parent_dir(args.output)
+    overlap.to_csv(output_path, index=False)
+
+    print(f"Rows              : {len(overlap):,}")
+    print(f"Date range        : {overlap['time'].min()} -> {overlap['time'].max()}")
+    print(f"Representative day: {representative} bars")
+    print(f"Saved             : {display_path(output_path)}")
+
 
 if __name__ == "__main__":
-    filter_london_ny_overlap()
+    main()

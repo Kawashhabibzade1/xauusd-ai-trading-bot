@@ -1,0 +1,91 @@
+{
+  "test_samples": 46,
+  "threshold_results": [
+    {
+      "threshold": 0.4,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.45,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.5,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.55,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.6,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.65,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.7,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.75,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    },
+    {
+      "threshold": 0.8,
+      "samples": 46,
+      "accuracy": 1.0,
+      "pct_total": 100.0,
+      "short_acc": 0.0,
+      "hold_acc": 1.0,
+      "long_acc": 0.0
+    }
+  ],
+  "selected_threshold": 0.4,
+  "selected_accuracy": 1.0,
+  "selected_retained_pct": 100.0,
+  "selection_reason": "target_met",
+  "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         0\n        HOLD      1.000     1.000     1.000        46\n        LONG      0.000     0.000     0.000         0\n\n    accuracy                          1.000        46\n   macro avg      0.333     0.333     0.333        46\nweighted avg      1.000     1.000     1.000        46\n"
+}

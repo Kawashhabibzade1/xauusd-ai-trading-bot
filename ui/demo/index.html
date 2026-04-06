@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>XAUUSD Pipeline Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Validation-First Preview</p>
+          <h1 id="page-title">XAUUSD Pipeline Dashboard</h1>
+          <p class="lede" id="page-lede">Loading dashboard context...</p>
+        </div>
+        <div class="hero-badge" id="runtime-badge">Loading...</div>
+      </header>
+
+      <main class="layout">
+        <section class="panel live-panel">
+          <div class="panel-heading">
+            <h2 id="live-title">Live Market Snapshot</h2>
+            <p id="live-market-subtitle">Current Twelve Data feed status.</p>
+          </div>
+          <div class="live-note" id="live-note"></div>
+          <div class="live-metrics" id="live-metrics"></div>
+          <div class="table-wrap" id="live-table"></div>
+        </section>
+
+        <section class="panel metrics-panel">
+          <div class="panel-heading">
+            <h2>Pipeline Snapshot</h2>
+            <p id="range-text"></p>
+          </div>
+          <div class="metrics-grid" id="metrics-grid"></div>
+        </section>
+
+        <section class="panel prediction-panel">
+          <div class="panel-heading">
+            <h2 id="prediction-title">Validation Prediction</h2>
+            <p id="prediction-time"></p>
+          </div>
+          <div class="live-note warning-note" id="prediction-note"></div>
+          <div class="prediction-summary">
+            <div class="signal-chip" id="signal-chip">Loading...</div>
+            <div class="model-meta" id="model-meta"></div>
+          </div>
+          <div class="probability-stack" id="probability-stack"></div>
+        </section>
+
+        <section class="panel feature-panel">
+          <div class="panel-heading">
+            <h2>Feature Snapshot</h2>
+            <p id="feature-note">The most recent engineered bar.</p>
+          </div>
+          <div class="feature-grid" id="feature-grid"></div>
+        </section>
+
+        <section class="panel artifacts-panel">
+          <div class="panel-heading">
+            <h2>Generated Files</h2>
+            <p>Canonical output paths preserved for the MT5 workflow.</p>
+          </div>
+          <div class="artifact-list" id="artifact-list"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-heading">
+            <h2>Standardized Data Preview</h2>
+            <p>First rows of the normalized one-minute source file.</p>
+          </div>
+          <div class="table-wrap" id="standardized-table"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-heading">
+            <h2>Overlap Window Preview</h2>
+            <p>The filtered London/NY overlap bars used for feature generation.</p>
+          </div>
+          <div class="table-wrap" id="overlap-table"></div>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="panel-heading">
+            <h2>Validation Fixture Preview</h2>
+            <p>The exported MT5 parity rows with probabilities from the current pipeline model.</p>
+          </div>
+          <div class="table-wrap" id="validation-table"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>

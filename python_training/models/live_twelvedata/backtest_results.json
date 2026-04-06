@@ -1,0 +1,16 @@
+{
+  "simulation_type": "approximate_non_executable",
+  "config": {
+    "confidence_threshold": 0.55,
+    "initial_capital": 50.0
+  },
+  "signals_retained": 46,
+  "performance": {
+    "total_trades": 0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "ending_equity": 50.0,
+    "return_percent": 0.0,
+    "max_drawdown": 0.0
+  }
+}

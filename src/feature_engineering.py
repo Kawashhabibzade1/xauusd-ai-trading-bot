@@ -1,319 +1,193 @@
 """
-Feature Engineering for XAUUSD AI Trading Bot
-Generates 61 features from OHLCV overlap data
+Feature engineering for the canonical 68-feature XAUUSD model contract.
 """
 
-import pandas as pd
+from __future__ import annotations
+
+import argparse
+
 import numpy as np
-from ta.trend import EMAIndicator, MACD, SMAIndicator
+import pandas as pd
 from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.trend import EMAIndicator, MACD, SMAIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 
-print("=" * 70)
-print("XAUUSD FEATURE ENGINEERING")
-print("=" * 70)
-print()
-
-# Load overlap data
-print("📥 Loading overlap data...")
-df = pd.read_csv('data/processed/xauusd_m1_overlap.csv')
-df['time'] = pd.to_datetime(df['time'])
-
-print(f"   Rows: {len(df):,}")
-print(f"   Date range: {df['time'].min().date()} → {df['time'].max().date()}")
-print()
-
-# Initialize feature counter
-feature_count = 0
-
-print("🔧 Computing features...")
-print()
-
-# ==================== TECHNICAL INDICATORS (21 features) ====================
-print("1️⃣ Technical Indicators...")
-
-# ATR
-atr_14 = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
-df['atr_14'] = atr_14.average_true_range()
-
-atr_5 = AverageTrueRange(df['high'], df['low'], df['close'], window=5)
-df['atr_5'] = atr_5.average_true_range()
-
-# RSI
-rsi = RSIIndicator(df['close'], window=14)
-df['rsi_14'] = rsi.rsi()
-
-# EMAs
-ema12 = EMAIndicator(df['close'], window=12)
-df['ema_12'] = ema12.ema_indicator()
-
-ema26 = EMAIndicator(df['close'], window=26)
-df['ema_26'] = ema26.ema_indicator()
-
-df['ema_12_slope'] = df['ema_12'].diff()
-df['ema_26_slope'] = df['ema_26'].diff()
-
-# SMAs
-sma50 = SMAIndicator(df['close'], window=50)
-df['sma_50'] = sma50.sma_indicator()
-
-sma200 = SMAIndicator(df['close'], window=200)
-df['sma_200'] = sma200.sma_indicator()
-
-# MACD
-macd = MACD(df['close'])
-df['macd'] = macd.macd()
-df['macd_signal'] = macd.macd_signal()
-df['macd_histogram'] = macd.macd_diff()
-
-# Bollinger Bands
-bb = BollingerBands(df['close'], window=20, window_dev=2)
-df['bb_upper'] = bb.bollinger_hband()
-df['bb_lower'] = bb.bollinger_lband()
-df['bb_middle'] = bb.bollinger_mavg()
-df['bb_width'] = df['bb_upper'] - df['bb_lower']
-df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'] + 0.0001)
-
-# VWAP (simplified - rolling window)
-df['vwap'] = (df['volume'] * (df['high'] + df['low'] + df['close']) / 3).rolling(60).sum() / (df['volume'].rolling(60).sum() + 0.0001)
-df['price_to_vwap'] = df['close'] / (df['vwap'] + 0.0001)
-
-# Stochastic
-stoch = StochasticOscillator(df['high'], df['low'], df['close'], window=14, smooth_window=3)
-df['stoch_k'] = stoch.stoch()
-df['stoch_d'] = stoch.stoch_signal()
-
-feature_count += 21
-print(f"   ✓ Added 21 technical indicators (Total: {feature_count})")
-
-# ==================== MARKET STRUCTURE (10 features) ====================
-print("2️⃣ Market Structure...")
-
-# Swing highs/lows
-df['swing_high_dist'] = df['high'].rolling(5, center=True).max().fillna(method='ffill') - df['close']
-df['swing_low_dist'] = df['close'] - df['low'].rolling(5, center=True).min().fillna(method='ffill')
-
-# Order blocks (simplified)
-df['bullish_ob'] = ((df['close'] > df['open']) & (df['close'].shift(-1) < df['open'].shift(-1))).astype(int)
-df['bearish_ob'] = ((df['close'] < df['open']) & (df['close'].shift(-1) > df['open'].shift(-1))).astype(int)
-
-# Fair Value Gaps
-df['fvg_up'] = df['low'].shift(-1) - df['high'].shift(1)
-df['fvg_down'] = df['low'].shift(1) - df['high'].shift(-1)
-df['fvg_size'] = df[['fvg_up', 'fvg_down']].max(axis=1)
-
-# Liquidity sweeps
-df['liquidity_sweep_high'] = ((df['high'] > df['high'].rolling(20).max().shift(1)) & (df['close'] < df['open'])).astype(int)
-df['liquidity_sweep_low'] = ((df['low'] < df['low'].rolling(20).min().shift(1)) & (df['close'] > df['open'])).astype(int)
-
-# Premium/Discount
-session_high = df['high'].rolling(240).max()
-session_low = df['low'].rolling(240).min()
-df['premium_discount'] = (df['close'] - session_low) / (session_high - session_low + 0.0001)
-
-feature_count += 10
-print(f"   ✓ Added 10 market structure features (Total: {feature_count})")
-
-# ==================== ORDERFLOW (8 features) ====================
-print("3️⃣ Orderflow Metrics...")
-
-# CVD (approximation)
-df['bar_direction'] = np.sign(df['close'] - df['open'])
-df['delta'] = df['volume'] * df['bar_direction']
-df['cvd'] = df['delta'].cumsum()
-
-# Delta divergence
-df['price_change'] = df['close'].pct_change()
-df['cvd_change'] = df['cvd'].pct_change()
-df['cvd_divergence'] = df['price_change'] - df['cvd_change']
-
-# Volume profile
-df['volume_ma'] = df['volume'].rolling(20).mean()
-df['volume_ratio'] = df['volume'] / (df['volume_ma'] + 0.0001)
-
-# Absorption
-df['price_range_norm'] = (df['high'] - df['low']) / (df['atr_14'] + 0.0001)
-df['absorption_score'] = df['volume_ratio'] * (1 / (df['price_range_norm'] + 0.001))
-
-feature_count += 8
-print(f"   ✓ Added 8 orderflow features (Total: {feature_count})")
-
-# ==================== TIME FEATURES (6 features) ====================
-print("4️⃣ Time Context...")
-
-df['hour'] = df['time'].dt.hour
-df['minute'] = df['time'].dt.minute
-df['dayofweek'] = df['time'].dt.dayofweek
-
-# Minutes since London/NY open
-london_open_minute = 8 * 60
-df['minutes_since_london'] = (df['hour'] * 60 + df['minute']) - london_open_minute
-
-ny_open_minute = 13 * 60 + 30
-df['minutes_since_ny'] = (df['hour'] * 60 + df['minute']) - ny_open_minute
-
-# Session position
-df['session_position'] = (df['minutes_since_ny'] / (3.5 * 60)).clip(0, 1)
-
-feature_count += 6
-print(f"   ✓ Added 6 time features (Total: {feature_count})")
-
-# ==================== VOLATILITY (8 features) ====================
-print("5️⃣ Volatility Context...")
-
-# ATR percentile
-df['atr_percentile'] = df['atr_14'].rolling(240).apply(
-    lambda x: (x.iloc[-1] <= x).sum() / len(x) if len(x) > 0 else 0.5, raw=False
+from pipeline_contract import (
+    BASE_COLUMNS,
+    DEFAULT_FEATURE_CONFIG,
+    DEFAULT_FEATURE_OUTPUT,
+    DEFAULT_OVERLAP_OUTPUT,
+    assert_ordered_features,
+    display_path,
+    ensure_parent_dir,
+    get_ordered_features,
+    resolve_repo_path,
 )
 
-# Tick volatility
-df['tick_volatility'] = df['close'].rolling(10).std()
 
-# Range expansion
-df['range_expansion'] = (df['high'] - df['low']) / (df['high'].shift(1) - df['low'].shift(1) + 0.0001)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", default=DEFAULT_OVERLAP_OUTPUT, help="Overlap OHLCV CSV input.")
+    parser.add_argument("--output", default=DEFAULT_FEATURE_OUTPUT, help="Feature CSV output.")
+    parser.add_argument("--feature-config", default=DEFAULT_FEATURE_CONFIG, help="Feature contract YAML path.")
+    return parser.parse_args()
 
-# Volatility regime
-atr_mean = df['atr_14'].rolling(240).mean()
-atr_std = df['atr_14'].rolling(240).std()
-df['volatility_regime'] = ((df['atr_14'] - atr_mean) / (atr_std + 0.0001)).fillna(0)
 
-# True range
-df['true_range'] = df['high'] - df['low']
-df['tr_percentile'] = df['true_range'].rolling(60).apply(
-    lambda x: (x.iloc[-1] <= x).sum() / len(x) if len(x) > 0 else 0.5, raw=False
-)
+def compute_feature_frame(df: pd.DataFrame, feature_config: str = DEFAULT_FEATURE_CONFIG) -> pd.DataFrame:
+    frame = df.copy()
+    frame["time"] = pd.to_datetime(frame["time"])
 
-# Price velocity
-df['price_velocity'] = df['close'].diff(3) / 3
-df['price_acceleration'] = df['price_velocity'].diff()
+    atr_14 = AverageTrueRange(frame["high"], frame["low"], frame["close"], window=14)
+    frame["atr_14"] = atr_14.average_true_range()
 
-feature_count += 8
-print(f"   ✓ Added 8 volatility features (Total: {feature_count})")
+    atr_5 = AverageTrueRange(frame["high"], frame["low"], frame["close"], window=5)
+    frame["atr_5"] = atr_5.average_true_range()
 
-# ==================== PRICE ACTION (6 features) ====================
-print("6️⃣ Price Action...")
+    rsi = RSIIndicator(frame["close"], window=14)
+    frame["rsi_14"] = rsi.rsi()
 
-# Returns
-df['returns_1m'] = df['close'].pct_change()
-df['returns_5m'] = df['close'].pct_change(5)
-df['returns_15m'] = df['close'].pct_change(15)
+    ema12 = EMAIndicator(frame["close"], window=12)
+    frame["ema_12"] = ema12.ema_indicator()
+    ema26 = EMAIndicator(frame["close"], window=26)
+    frame["ema_26"] = ema26.ema_indicator()
+    frame["ema_12_slope"] = frame["ema_12"].diff()
+    frame["ema_26_slope"] = frame["ema_26"].diff()
 
-# Momentum
-df['momentum'] = df['close'] - df['close'].shift(14)
+    frame["sma_50"] = SMAIndicator(frame["close"], window=50).sma_indicator()
+    frame["sma_200"] = SMAIndicator(frame["close"], window=200).sma_indicator()
 
-# Distance to highs/lows
-df['dist_to_high'] = (df['high'].rolling(50).max() - df['close']) / (df['atr_14'] + 0.0001)
-df['dist_to_low'] = (df['close'] - df['low'].rolling(50).min()) / (df['atr_14'] + 0.0001)
+    macd = MACD(frame["close"])
+    frame["macd"] = macd.macd()
+    frame["macd_signal"] = macd.macd_signal()
+    frame["macd_histogram"] = macd.macd_diff()
 
-feature_count += 6
-print(f"   ✓ Added 6 price action features (Total: {feature_count})")
+    bb = BollingerBands(frame["close"], window=20, window_dev=2)
+    frame["bb_upper"] = bb.bollinger_hband()
+    frame["bb_lower"] = bb.bollinger_lband()
+    frame["bb_middle"] = bb.bollinger_mavg()
+    frame["bb_width"] = frame["bb_upper"] - frame["bb_lower"]
+    frame["bb_position"] = (frame["close"] - frame["bb_lower"]) / (frame["bb_upper"] - frame["bb_lower"] + 0.0001)
 
-# ==================== SENTIMENT (1 feature) ====================
-print("7️⃣ Sentiment...")
-df['sentiment'] = 0.0  # Placeholder (can be updated with real sentiment data)
-feature_count += 1
-print(f"   ✓ Added 1 sentiment feature (Total: {feature_count})")
+    typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3.0
+    frame["vwap"] = (frame["volume"] * typical_price).rolling(60).sum() / (frame["volume"].rolling(60).sum() + 0.0001)
+    frame["price_to_vwap"] = frame["close"] / (frame["vwap"] + 0.0001)
 
-# ==================== SMC QUALITY SCORE (1 feature) - NEW! ====================
-print("8️⃣ SMC Quality Score (70% Win Rate Strategy)...")
+    stoch = StochasticOscillator(frame["high"], frame["low"], frame["close"], window=14, smooth_window=3)
+    frame["stoch_k"] = stoch.stoch()
+    frame["stoch_d"] = stoch.stoch_signal()
 
-# H4 range (4 hours = 240 bars)
-h4_high = df['high'].rolling(240).max()
-h4_low = df['low'].rolling(240).min()
-h4_mid = (h4_high + h4_low) / 2
+    frame["swing_high_dist"] = frame["high"].rolling(5).max() - frame["close"]
+    frame["swing_low_dist"] = frame["close"] - frame["low"].rolling(5).min()
+    frame["bullish_ob"] = ((frame["close"].shift(1) > frame["open"].shift(1)) & (frame["close"] < frame["open"])).astype(int)
+    frame["bearish_ob"] = ((frame["close"].shift(1) < frame["open"].shift(1)) & (frame["close"] > frame["open"])).astype(int)
+    frame["fvg_up"] = frame["low"] - frame["high"].shift(2)
+    frame["fvg_down"] = frame["low"].shift(2) - frame["high"]
+    frame["fvg_size"] = frame[["fvg_up", "fvg_down"]].max(axis=1)
+    frame["liquidity_sweep_high"] = (
+        (frame["high"] > frame["high"].rolling(20).max().shift(1)) & (frame["close"] < frame["open"])
+    ).astype(int)
+    frame["liquidity_sweep_low"] = (
+        (frame["low"] < frame["low"].rolling(20).min().shift(1)) & (frame["close"] > frame["open"])
+    ).astype(int)
 
-# Step 1: H4 Directional Bias
-df['h4_bias'] = np.where(
-    (df['close'] > h4_mid) & (df['close'] > df['close'].shift(240)),
-    1,  # Bullish
-    np.where(
-        (df['close'] < h4_mid) & (df['close'] < df['close'].shift(240)),
-        -1,  # Bearish
-        0   # Neutral
+    session_high = frame["high"].rolling(240).max()
+    session_low = frame["low"].rolling(240).min()
+    frame["premium_discount"] = (frame["close"] - session_low) / (session_high - session_low + 0.0001)
+
+    frame["bar_direction"] = np.sign(frame["close"] - frame["open"])
+    frame["delta"] = frame["volume"] * frame["bar_direction"]
+    frame["cvd"] = frame["delta"].cumsum()
+    frame["price_change"] = frame["close"].pct_change()
+    frame["cvd_change"] = frame["cvd"].pct_change()
+    frame["cvd_divergence"] = frame["price_change"] - frame["cvd_change"]
+    frame["volume_ma"] = frame["volume"].rolling(20).mean()
+    frame["volume_ratio"] = frame["volume"] / (frame["volume_ma"] + 0.0001)
+    frame["price_range_norm"] = (frame["high"] - frame["low"]) / (frame["atr_14"] + 0.0001)
+    frame["absorption_score"] = frame["volume_ratio"] * (1.0 / (frame["price_range_norm"] + 0.001))
+
+    frame["hour"] = frame["time"].dt.hour
+    frame["minute"] = frame["time"].dt.minute
+    frame["dayofweek"] = frame["time"].dt.dayofweek
+    frame["minutes_since_london"] = (frame["hour"] * 60 + frame["minute"]) - (8 * 60)
+    frame["minutes_since_ny"] = (frame["hour"] * 60 + frame["minute"]) - (13 * 60 + 30)
+    frame["session_position"] = (frame["minutes_since_ny"] / (3.5 * 60)).clip(0, 1)
+
+    frame["atr_percentile"] = frame["atr_14"].rolling(240).apply(
+        lambda values: (values.iloc[-1] <= values).sum() / len(values) if len(values) else 0.5,
+        raw=False,
     )
-)
+    frame["tick_volatility"] = frame["close"].rolling(10).std()
+    frame["range_expansion"] = (frame["high"] - frame["low"]) / (frame["high"].shift(1) - frame["low"].shift(1) + 0.0001)
+    atr_mean = frame["atr_14"].rolling(240).mean()
+    atr_std = frame["atr_14"].rolling(240).std()
+    frame["volatility_regime"] = ((frame["atr_14"] - atr_mean) / (atr_std + 0.0001)).fillna(0)
+    frame["true_range"] = frame["high"] - frame["low"]
+    frame["tr_percentile"] = frame["true_range"].rolling(60).apply(
+        lambda values: (values.iloc[-1] <= values).sum() / len(values) if len(values) else 0.5,
+        raw=False,
+    )
+    frame["price_velocity"] = frame["close"].diff(3) / 3
+    frame["price_acceleration"] = frame["price_velocity"].diff()
 
-# Step 2: Premium/Discount Zone
-df['in_discount'] = (df['close'] < h4_mid).astype(int)
-df['in_premium'] = (df['close'] > h4_mid).astype(int)
+    frame["returns_1m"] = frame["close"].pct_change()
+    frame["returns_5m"] = frame["close"].pct_change(5)
+    frame["returns_15m"] = frame["close"].pct_change(15)
+    frame["momentum"] = frame["close"] - frame["close"].shift(14)
+    frame["dist_to_high"] = (frame["high"].rolling(50).max() - frame["close"]) / (frame["atr_14"] + 0.0001)
+    frame["dist_to_low"] = (frame["close"] - frame["low"].rolling(50).min()) / (frame["atr_14"] + 0.0001)
+    frame["sentiment"] = 0.0
 
-# Step 3: Inducement (Liquidity Sweep)
-df['inducement_taken'] = (df['liquidity_sweep_high'] | df['liquidity_sweep_low']).astype(int)
+    h4_high = frame["high"].rolling(240).max()
+    h4_low = frame["low"].rolling(240).min()
+    h4_mid = (h4_high + h4_low) / 2.0
+    frame["h4_bias"] = np.where(
+        (frame["close"] > h4_mid) & (frame["close"] > frame["close"].shift(240)),
+        1,
+        np.where((frame["close"] < h4_mid) & (frame["close"] < frame["close"].shift(240)), -1, 0),
+    )
+    frame["in_discount"] = (frame["close"] < h4_mid).astype(int)
+    frame["in_premium"] = (frame["close"] > h4_mid).astype(int)
+    frame["inducement_taken"] = (frame["liquidity_sweep_high"] | frame["liquidity_sweep_low"]).astype(int)
+    frame["entry_zone_present"] = (
+        (frame["fvg_size"] > 0) | (frame["bullish_ob"] == 1) | (frame["bearish_ob"] == 1)
+    ).astype(int)
+    frame["smc_quality_score"] = (
+        (frame["h4_bias"] != 0).astype(int)
+        + ((frame["in_discount"] == 1) | (frame["in_premium"] == 1)).astype(int)
+        + (frame["inducement_taken"] == 1).astype(int)
+        + (frame["entry_zone_present"] == 1).astype(int)
+    )
 
-# Step 4: Entry Zone Present
-df['entry_zone_present'] = (
-    (df['fvg_size'] > 0) | 
-    (df['bullish_ob'] == 1) | 
-    (df['bearish_ob'] == 1)
-).astype(int)
+    ordered_features = get_ordered_features(feature_config)
+    feature_only = frame.dropna(subset=ordered_features).copy()
+    feature_only = feature_only.loc[:, list(BASE_COLUMNS) + ordered_features]
+    assert_ordered_features(feature_only.columns[len(BASE_COLUMNS):], feature_config, context="engineered features")
+    return feature_only.reset_index(drop=True)
 
-# SMC Quality Score: 0-4
-df['smc_quality_score'] = (
-    (df['h4_bias'] != 0).astype(int) +
-    ((df['in_discount'] == 1) | (df['in_premium'] == 1)).astype(int) +
-    (df['inducement_taken'] == 1).astype(int) +
-    (df['entry_zone_present'] == 1).astype(int)
-)
 
-feature_count += 1
-print(f"   ✓ Added SMC quality score (Total: {feature_count})")
+def main() -> None:
+    args = parse_args()
+    print("=" * 70)
+    print("XAUUSD FEATURE ENGINEERING")
+    print("=" * 70)
+    print(f"Input         : {display_path(args.input)}")
+    print(f"Output        : {display_path(args.output)}")
+    print(f"Feature config: {display_path(args.feature_config)}")
+    print()
 
-print()
-print(f"✅ Feature computation complete: {feature_count} total features")
-print()
+    input_path = resolve_repo_path(args.input)
+    overlap = pd.read_csv(input_path)
+    features = compute_feature_frame(overlap, args.feature_config)
+    ordered_features = get_ordered_features(args.feature_config)
 
-# Remove NaN rows (from indicator lookback periods)
-print("🧹 Cleaning data...")
-before_clean = len(df)
-df = df.dropna()
-after_clean = len(df)
-removed = before_clean - after_clean
+    output_path = ensure_parent_dir(args.output)
+    features.to_csv(output_path, index=False)
 
-print(f"   Rows before: {before_clean:,}")
-print(f"   Rows after: {after_clean:,}")
-print(f"   Removed (NaN): {removed:,}")
-print()
+    print(f"Rows         : {len(features):,}")
+    print(f"Feature count: {len(ordered_features)}")
+    print(f"Date range   : {features['time'].min()} -> {features['time'].max()}")
+    print(f"Saved        : {display_path(output_path)}")
 
-# Save feature data
-output_file = 'data/processed/xauusd_features.csv'
-print(f"💾 Saving features to: {output_file}")
 
-df.to_csv(output_file, index=False)
-
-file_size_mb = len(df) * len(df.columns) * 8 / (1024**2)  # Approximate
-print(f"   File size: ~{file_size_mb:.1f} MB")
-print(f"   Shape: {df.shape}")
-print()
-
-# Show feature list
-print("📋 Feature List (61 total):")
-feature_cols = [col for col in df.columns if col not in ['time', 'open', 'high', 'low', 'close', 'volume']]
-for i, col in enumerate(feature_cols, 1):
-    print(f"   {i:2d}. {col}")
-
-print()
-
-# Show SMC quality score distribution
-print("📊 SMC Quality Score Distribution:")
-smc_dist = df['smc_quality_score'].value_counts().sort_index()
-for score, count in smc_dist.items():
-    pct = count / len(df) * 100
-    print(f"   Score {int(score)}: {count:,} bars ({pct:.1f}%)")
-
-print()
-print("=" * 70)
-print("✅ FEATURE ENGINEERING COMPLETE!")
-print("=" * 70)
-print()
-print("📊 Summary:")
-print(f"   Input bars: 180,000")
-print(f"   Output bars: {len(df):,}")
-print(f"   Features: {len(feature_cols)}")
-print(f"   File: {output_file}")
-print()
-print("💡 SMC Quality Insight:")
-print("   Score 3-4: High-probability setups (target these)")
-print("   Score 0-2: Lower-probability (ML model will filter)")
-print()
-print("🎯 Next Step:")
-print("   Run: python create_labels.py")
+if __name__ == "__main__":
+    main()

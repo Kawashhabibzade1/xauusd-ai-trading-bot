@@ -1,32 +1,7 @@
-# Core dependencies
-pandas
-numpy
-matplotlib
-seaborn
-
-# Technical analysis
-ta
-pandas-ta
-
-# Machine learning
-scikit-learn
-lightgbm
-xgboost
-
-# Deep learning
-torch
-torchvision
-
-# ONNX (install manually if needed: pip install onnxruntime)
-onnx
-
-# MT5 connection
-MetaTrader5
-
-# Data download
-duka
-
-# Utilities
-tqdm
-pyyaml
-python-dotenv
+# Critical-path Python pipeline
+pandas>=2.0
+numpy>=1.24
+ta>=0.11
+scikit-learn>=1.4
+lightgbm>=4.0
+pyyaml>=6.0

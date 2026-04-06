@@ -1,0 +1,625 @@
+{
+  "source": {
+    "input_path": "data/live/xauusd_twelvedata_raw.csv",
+    "source_kind": "canonical_ohlcv",
+    "volume_kind": "source_volume",
+    "rows": 5000,
+    "start": "2026-04-02 11:18:00",
+    "end": "2026-04-05 22:37:00",
+    "gaps": 0
+  },
+  "dataset_summary": {
+    "standardized_rows": 5000,
+    "research_rows": 4761,
+    "label_rows": 4701,
+    "prediction_rows": 4701,
+    "paper_trade_rows": 0,
+    "sessions": {
+      "Asia": 1260,
+      "London": 1080,
+      "New York": 960,
+      "Overlap": 823,
+      "Off Hours": 578
+    },
+    "regimes": {
+      "Range": 3432,
+      "Trend Down": 653,
+      "Trend Up": 536,
+      "Volatile Range": 80
+    },
+    "recommended_trade_counts": {
+      "WATCH": 4701
+    }
+  },
+  "feature_columns": [
+    "atr_14",
+    "atr_5",
+    "rsi_14",
+    "ema_12",
+    "ema_26",
+    "ema_12_slope",
+    "ema_26_slope",
+    "sma_50",
+    "sma_200",
+    "macd",
+    "macd_signal",
+    "macd_histogram",
+    "bb_upper",
+    "bb_lower",
+    "bb_middle",
+    "bb_width",
+    "bb_position",
+    "stoch_k",
+    "stoch_d",
+    "swing_high_dist",
+    "swing_low_dist",
+    "bullish_ob",
+    "bearish_ob",
+    "fvg_up",
+    "fvg_down",
+    "fvg_size",
+    "liquidity_sweep_high",
+    "liquidity_sweep_low",
+    "premium_discount",
+    "bar_direction",
+    "price_change",
+    "price_range_norm",
+    "hour",
+    "minute",
+    "dayofweek",
+    "minutes_since_london",
+    "minutes_since_ny",
+    "session_position",
+    "atr_percentile",
+    "tick_volatility",
+    "range_expansion",
+    "volatility_regime",
+    "true_range",
+    "tr_percentile",
+    "price_velocity",
+    "price_acceleration",
+    "returns_1m",
+    "returns_5m",
+    "returns_15m",
+    "momentum",
+    "dist_to_high",
+    "dist_to_low",
+    "h4_bias",
+    "in_discount",
+    "in_premium",
+    "inducement_taken",
+    "entry_zone_present",
+    "smc_quality_score",
+    "asia",
+    "london",
+    "new_york",
+    "overlap",
+    "session_allowed",
+    "session_open_minutes",
+    "killzone_count",
+    "impulse_strength",
+    "liquidity_proximity",
+    "trap_state",
+    "continuation_state",
+    "exhaustion_state",
+    "mean_reversion_risk",
+    "time_of_day_bias",
+    "session_bias_score"
+  ],
+  "feature_count": 73,
+  "baseline": {
+    "horizons": {
+      "5": {
+        "target": "direction_5m",
+        "fold_metrics": [
+          {
+            "fold": 1,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.14483368590960422,
+            "brier": 0.02840165122826249
+          },
+          {
+            "fold": 2,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.0051282163669195665,
+            "brier": 3.924621110537045e-05
+          },
+          {
+            "fold": 3,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.003412972596239846,
+            "brier": 1.7413058052232625e-05
+          },
+          {
+            "fold": 4,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.00255754615111712,
+            "brier": 9.786507342327054e-06
+          },
+          {
+            "fold": 5,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.002047083621724799,
+            "brier": 6.2729747700952765e-06
+          }
+        ],
+        "overall_accuracy": 1.0,
+        "overall_log_loss": 0.03159590092912111,
+        "overall_brier": 0.0056948739959065044,
+        "short_precision": 0.0,
+        "hold_precision": 1.0,
+        "long_precision": 0.0,
+        "long_recall": 0.0,
+        "signal_rate": 0.0,
+        "trade_precision": 0.0,
+        "trade_recall": 0.0,
+        "class_distribution_true": {
+          "SHORT": 0,
+          "HOLD": 3915,
+          "LONG": 0
+        },
+        "class_distribution_predicted": {
+          "SHORT": 0,
+          "HOLD": 3915,
+          "LONG": 0
+        },
+        "confidence_bins": [
+          {
+            "bin_start": 0.8,
+            "bin_end": 0.9,
+            "count": 783,
+            "avg_confidence": 0.8652391464326195,
+            "accuracy": 1.0
+          },
+          {
+            "bin_start": 0.9,
+            "bin_end": 1.0,
+            "count": 3132,
+            "avg_confidence": 0.9967196218172453,
+            "accuracy": 1.0
+          }
+        ],
+        "session_metrics": {
+          "Asia": {
+            "samples": 997,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "London": {
+            "samples": 1080,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "New York": {
+            "samples": 720,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "Off Hours": {
+            "samples": 398,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "Overlap": {
+            "samples": 720,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          }
+        },
+        "prediction_coverage": 0.8328015315890236,
+        "model_path": "python_training/models/research/baseline/h5/model.joblib"
+      },
+      "15": {
+        "target": "trade_setup_label",
+        "fold_metrics": [
+          {
+            "fold": 1,
+            "samples": 783,
+            "accuracy": 0.5606641123882503,
+            "log_loss": 1.1476913854626456,
+            "brier": 0.6690148178339778
+          },
+          {
+            "fold": 2,
+            "samples": 783,
+            "accuracy": 0.8390804597701149,
+            "log_loss": 0.4283505562875442,
+            "brier": 0.20825181459362307
+          },
+          {
+            "fold": 3,
+            "samples": 783,
+            "accuracy": 0.7369093231162197,
+            "log_loss": 0.7093433835156467,
+            "brier": 0.40030908539373805
+          },
+          {
+            "fold": 4,
+            "samples": 783,
+            "accuracy": 0.9974457215836526,
+            "log_loss": 0.2031820640230655,
+            "brier": 0.059255596715781386
+          },
+          {
+            "fold": 5,
+            "samples": 783,
+            "accuracy": 0.9719029374201787,
+            "log_loss": 0.24780543027787408,
+            "brier": 0.09798435486903809
+          }
+        ],
+        "overall_accuracy": 0.8212005108556832,
+        "overall_log_loss": 0.5472745639133552,
+        "overall_brier": 0.28696313388123174,
+        "short_precision": 0.0,
+        "hold_precision": 0.8648867313915858,
+        "long_precision": 1.0,
+        "long_recall": 0.0365296803652968,
+        "signal_rate": 0.052873563218390804,
+        "trade_precision": 0.5,
+        "trade_recall": 0.0182648401826484,
+        "class_distribution_true": {
+          "SHORT": 290,
+          "HOLD": 3406,
+          "LONG": 219
+        },
+        "class_distribution_predicted": {
+          "SHORT": 199,
+          "HOLD": 3708,
+          "LONG": 8
+        },
+        "confidence_bins": [
+          {
+            "bin_start": 0.30000000000000004,
+            "bin_end": 0.4,
+            "count": 9,
+            "avg_confidence": 0.3891039101048601,
+            "accuracy": 0.4444444444444444
+          },
+          {
+            "bin_start": 0.4,
+            "bin_end": 0.5,
+            "count": 225,
+            "avg_confidence": 0.45029009049214386,
+            "accuracy": 0.4666666666666667
+          },
+          {
+            "bin_start": 0.5,
+            "bin_end": 0.6000000000000001,
+            "count": 432,
+            "avg_confidence": 0.5444139816637062,
+            "accuracy": 0.6620370370370371
+          },
+          {
+            "bin_start": 0.6000000000000001,
+            "bin_end": 0.7000000000000001,
+            "count": 159,
+            "avg_confidence": 0.6460561251381565,
+            "accuracy": 0.6226415094339622
+          },
+          {
+            "bin_start": 0.7000000000000001,
+            "bin_end": 0.8,
+            "count": 1175,
+            "avg_confidence": 0.7750272856773188,
+            "accuracy": 0.7114893617021276
+          },
+          {
+            "bin_start": 0.8,
+            "bin_end": 0.9,
+            "count": 1820,
+            "avg_confidence": 0.84021821258147,
+            "accuracy": 0.9835164835164835
+          },
+          {
+            "bin_start": 0.9,
+            "bin_end": 1.0,
+            "count": 95,
+            "avg_confidence": 0.9034079617742151,
+            "accuracy": 1.0
+          }
+        ],
+        "session_metrics": {
+          "Asia": {
+            "samples": 997,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "London": {
+            "samples": 1080,
+            "accuracy": 0.7759259259259259,
+            "signal_rate": 0.05648148148148148,
+            "trade_precision": 0.5
+          },
+          "New York": {
+            "samples": 720,
+            "accuracy": 0.6847222222222222,
+            "signal_rate": 0.08055555555555556,
+            "trade_precision": 0.5
+          },
+          "Off Hours": {
+            "samples": 398,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "Overlap": {
+            "samples": 720,
+            "accuracy": 0.6791666666666667,
+            "signal_rate": 0.12222222222222222,
+            "trade_precision": 0.5
+          }
+        },
+        "prediction_coverage": 0.8328015315890236,
+        "model_path": "python_training/models/research/baseline/h15/model.joblib"
+      },
+      "60": {
+        "target": "direction_60m",
+        "fold_metrics": [
+          {
+            "fold": 1,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.057482580459541556,
+            "brier": 0.005872061602896665
+          },
+          {
+            "fold": 2,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.0051282163669195665,
+            "brier": 3.924621110537045e-05
+          },
+          {
+            "fold": 3,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.003412972596239846,
+            "brier": 1.7413058052232625e-05
+          },
+          {
+            "fold": 4,
+            "samples": 783,
+            "accuracy": 1.0,
+            "log_loss": 0.00255754615111712,
+            "brier": 9.786507342327054e-06
+          },
+          {
+            "fold": 5,
+            "samples": 783,
+            "accuracy": 0.9514687100893997,
+            "log_loss": 0.3361104019917089,
+            "brier": 0.09677111482105893
+          }
+        ],
+        "overall_accuracy": 0.9902937420178799,
+        "overall_log_loss": 0.08093834351310539,
+        "overall_brier": 0.02054192444009111,
+        "short_precision": 0.0,
+        "hold_precision": 0.9902937420178799,
+        "long_precision": 0.0,
+        "long_recall": 0.0,
+        "signal_rate": 0.0,
+        "trade_precision": 0.0,
+        "trade_recall": 0.0,
+        "class_distribution_true": {
+          "SHORT": 38,
+          "HOLD": 3877,
+          "LONG": 0
+        },
+        "class_distribution_predicted": {
+          "SHORT": 0,
+          "HOLD": 3915,
+          "LONG": 0
+        },
+        "confidence_bins": [
+          {
+            "bin_start": 0.9,
+            "bin_end": 1.0,
+            "count": 3915,
+            "avg_confidence": 0.9862171824978986,
+            "accuracy": 0.9902937420178799
+          }
+        ],
+        "session_metrics": {
+          "Asia": {
+            "samples": 997,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "London": {
+            "samples": 1080,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "New York": {
+            "samples": 720,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "Off Hours": {
+            "samples": 398,
+            "accuracy": 0.9045226130653267,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          },
+          "Overlap": {
+            "samples": 720,
+            "accuracy": 1.0,
+            "signal_rate": 0.0,
+            "trade_precision": 0.0
+          }
+        },
+        "prediction_coverage": 0.8328015315890236,
+        "model_path": "python_training/models/research/baseline/h60/model.joblib"
+      }
+    },
+    "walk_forward_splits": 5
+  },
+  "neural": {
+    "status": "disabled_in_config",
+    "notes": [
+      "PatchTST training is disabled in the research config."
+    ]
+  },
+  "ensemble": {
+    "status": "disabled_in_config",
+    "notes": [
+      "Ensemble defaults to the calibrated baseline when neural predictions are unavailable.",
+      "PatchTST training is disabled in the research config."
+    ]
+  },
+  "latest_signal": {
+    "time": "2026-04-05 21:37:00",
+    "signal": "WATCH",
+    "signal_5m": 0,
+    "signal_15m": 0,
+    "signal_60m": 0,
+    "session_name": "Off Hours",
+    "regime": "Range",
+    "setup_score": 0.2047061630914834,
+    "expected_value": 0.0,
+    "prob_short_5m": 0.001022494887525563,
+    "prob_hold_5m": 0.9979550102249489,
+    "prob_long_5m": 0.001022494887525563,
+    "prob_short_15m": 0.04565159667740223,
+    "prob_hold_15m": 0.9077791520081901,
+    "prob_long_15m": 0.04656925131440759,
+    "prob_short_60m": 0.001022494887525563,
+    "prob_hold_60m": 0.9979550102249489,
+    "prob_long_60m": 0.001022494887525563,
+    "entry_price": 4676.52502,
+    "stop_loss": 4676.319386315237,
+    "tp1": 4676.8334705271445,
+    "tp2": 4677.039104211908,
+    "reason_blocked": "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE",
+    "gate_status": "BLOCKED",
+    "paper_status": "BLOCKED",
+    "paper_reason_blocked": "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE",
+    "confluence_tags": "OFF_HOURS|ENTRY_ZONE|BEARISH_OB|SWEEP_LOW|TRAP"
+  },
+  "session_profile": {
+    "Asia": {
+      "bars": 1260,
+      "avg_return_1m": -2.6669718537213302e-08,
+      "avg_volume_ratio": 1.0014058405176813,
+      "avg_session_dominance": 0.3349206375169746,
+      "avg_impulse_strength": 0.36750903035805654,
+      "entry_zone_rate": 0.6587301587301587
+    },
+    "London": {
+      "bars": 1080,
+      "avg_return_1m": -1.2954994173921377e-08,
+      "avg_volume_ratio": 1.00471546216099,
+      "avg_session_dominance": 0.32222222121416744,
+      "avg_impulse_strength": 0.37485561411120527,
+      "entry_zone_rate": 0.6620370370370371
+    },
+    "New York": {
+      "bars": 960,
+      "avg_return_1m": 3.3699273832267508e-06,
+      "avg_volume_ratio": 1.0090295560165774,
+      "avg_session_dominance": 0.23333333381308485,
+      "avg_impulse_strength": 0.45853539529466286,
+      "entry_zone_rate": 0.7
+    },
+    "Off Hours": {
+      "bars": 578,
+      "avg_return_1m": -9.690253548712506e-08,
+      "avg_volume_ratio": 0.9932064266176509,
+      "avg_session_dominance": 0.3494809687870126,
+      "avg_impulse_strength": 0.3596096124905943,
+      "entry_zone_rate": 0.6453287197231834
+    },
+    "Overlap": {
+      "bars": 823,
+      "avg_return_1m": -4.180617069283928e-06,
+      "avg_volume_ratio": 0.9997302803884002,
+      "avg_session_dominance": 0.2879708208520712,
+      "avg_impulse_strength": 0.417249804072286,
+      "entry_zone_rate": 0.6573511543134872
+    }
+  },
+  "overlay_counts": {
+    "fvg_zones": 230,
+    "bos_events": 95,
+    "choch_events": 3397,
+    "order_blocks": 2982,
+    "entry_markers": 3131,
+    "liquidity_levels": 269
+  },
+  "paper_trading": {
+    "trade_count": 0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "expectancy_r": 0.0,
+    "expectancy_cash": 0.0,
+    "max_drawdown": 0.0,
+    "precision": 0.0,
+    "equity_curve": [],
+    "session_breakdown": {},
+    "blocked_reason_counts": {
+      "MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 1893,
+      "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 1321,
+      "MAIN_BIAS_HOLD|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 763,
+      "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 517,
+      "H60_NOT_CONFIRMED|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 115,
+      "H60_NOT_CONFIRMED|NEGATIVE_EV|LOW_SETUP_SCORE": 53,
+      "H60_NOT_CONFIRMED|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 26,
+      "H60_NOT_CONFIRMED|NEGATIVE_EV": 11,
+      "H60_NOT_CONFIRMED|LOW_ENTRY_QUALITY|NEGATIVE_EV|LOW_SETUP_SCORE": 2
+    },
+    "open_positions": []
+  },
+  "backtest": {
+    "trade_count": 0,
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "expectancy_r": 0.0,
+    "expectancy_cash": 0.0,
+    "max_drawdown": 0.0,
+    "precision": 0.0,
+    "equity_curve": [],
+    "session_breakdown": {},
+    "blocked_reason_counts": {
+      "MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 1893,
+      "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 1321,
+      "MAIN_BIAS_HOLD|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 763,
+      "SESSION_BLOCKED|MAIN_BIAS_HOLD|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 517,
+      "H60_NOT_CONFIRMED|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 115,
+      "H60_NOT_CONFIRMED|NEGATIVE_EV|LOW_SETUP_SCORE": 53,
+      "H60_NOT_CONFIRMED|LOW_ENTRY_QUALITY|LOW_CONFIDENCE|NEGATIVE_EV|LOW_SETUP_SCORE": 26,
+      "H60_NOT_CONFIRMED|NEGATIVE_EV": 11,
+      "H60_NOT_CONFIRMED|LOW_ENTRY_QUALITY|NEGATIVE_EV|LOW_SETUP_SCORE": 2
+    },
+    "open_positions": []
+  },
+  "outputs": {
+    "standardized_output": "data/research/xauusd_m1_standardized.csv",
+    "research_output": "data/research/xauusd_research_ready.csv",
+    "label_output": "data/research/xauusd_research_labels.csv",
+    "overlays_output": "data/research/xauusd_research_overlays.json",
+    "predictions_output": "data/research/xauusd_research_predictions.csv",
+    "paper_output": "data/research/xauusd_paper_ledger.csv",
+    "report_output": "data/research/xauusd_research_report.json"
+  },
+  "notes": [
+    "This research cockpit is signal-plus-paper-trading only and does not auto-trade.",
+    "Primary model features are Twelve Data compatible core features; volume-proxy fields remain research-only context.",
+    "Trade quality should be judged by precision of emitted signals, expectancy, profit factor, drawdown, and calibration."
+  ]
+}

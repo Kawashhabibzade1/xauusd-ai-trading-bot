@@ -1,0 +1,83 @@
+data:
+  default_input: "data/live/xauusd_twelvedata_raw.csv"
+  timezone: "UTC"
+  infer_volume_from_change_pips: true
+  source_preference: "twelvedata_only"
+
+sessions:
+  asia_hours: [0, 1, 2, 3, 4, 5, 6, 7]
+  london_hours: [7, 8, 9, 10, 11, 12]
+  new_york_hours: [13, 14, 15, 16, 17, 18, 19, 20]
+  overlap_hours: [13, 14, 15, 16]
+  killzones:
+    london_open: [7, 10]
+    new_york_open: [13, 16]
+    asia_open: [0, 2]
+
+labels:
+  horizons:
+    - 5
+    - 15
+    - 60
+  return_thresholds:
+    "5": 0.00035
+    "15": 0.00050
+    "60": 0.00120
+  spread_bps: 0.00010
+  slippage_bps: 0.00005
+  stop_atr_multiple: 1.00
+  tp1_rr: 1.50
+  tp2_rr: 2.50
+  entry_quality_window: 60
+
+walk_forward:
+  n_splits: 5
+  gap: 15
+  min_train_rows: 400
+
+baseline:
+  num_leaves: 31
+  learning_rate: 0.05
+  n_estimators: 150
+  subsample: 0.85
+  colsample_bytree: 0.85
+  random_state: 42
+  min_child_samples: 25
+  confidence_threshold: 0.58
+  class_weight: "balanced"
+
+neural:
+  enabled: false
+  lookback: 128
+  patch_len: 8
+  stride: 8
+  d_model: 96
+  n_heads: 4
+  n_layers: 3
+  dropout: 0.10
+  batch_size: 128
+  epochs: 12
+  learning_rate: 0.001
+  weight_decay: 0.0001
+
+ensemble:
+  baseline_weight: 0.60
+  neural_weight: 0.40
+  confidence_threshold: 0.58
+  setup_score_weights:
+    probability: 0.45
+    confluence: 0.30
+    session: 0.10
+    expected_value: 0.15
+
+trading:
+  allowed_sessions: ["London", "New York", "Overlap"]
+  min_entry_quality: 0.35
+  min_setup_score: 0.58
+  paper:
+    starting_equity: 100000.0
+    risk_per_trade: 0.0025
+    max_open_trades: 1
+    max_trades_per_day: 4
+    daily_loss_streak_stop: 2
+    max_holding_bars: 60

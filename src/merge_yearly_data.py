@@ -1,6 +1,8 @@
 """
-Merge yearly XAUUSD CSV files into one master dataset
-Handles: XAUUSD_1m_2023.csv, XAUUSD_1m_2024.csv, XAUUSD_1m_2025.csv
+Optional helper for merging multiple yearly CSV files into one raw dataset.
+
+This is no longer the primary pipeline entrypoint. The default repo flow uses
+`data/xauusd_m1_2022_2025.csv` directly.
 """
 
 import pandas as pd
