@@ -120,15 +120,22 @@ def inject_styles() -> None:
         .ribbon-stack {
           display: flex;
           flex-direction: column;
-          gap: 0.28rem;
+          gap: 0.16rem;
         }
 
         .ribbon-box {
-          border-radius: 10px;
-          padding: 0.32rem 0.45rem;
+          border-radius: 8px;
+          padding: 0.18rem 0.30rem;
           border: 1px solid rgba(24,36,47,0.10);
-          box-shadow: 0 5px 14px rgba(24, 36, 47, 0.04);
+          box-shadow: 0 4px 10px rgba(24, 36, 47, 0.03);
           color: #fffaf0;
+        }
+
+        .ribbon-inline {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.28rem;
         }
 
         .ribbon-up {
@@ -144,23 +151,23 @@ def inject_styles() -> None:
         }
 
         .ribbon-time {
-          font-size: 0.62rem;
-          opacity: 0.82;
+          font-size: 0.52rem;
+          opacity: 0.88;
           letter-spacing: 0.06em;
           text-transform: uppercase;
           line-height: 1.1;
         }
 
         .ribbon-direction {
-          font-size: 0.82rem;
+          font-size: 0.63rem;
           font-weight: 700;
           letter-spacing: 0.05em;
           line-height: 1.1;
         }
 
         .ribbon-move {
-          font-size: 0.68rem;
-          opacity: 0.88;
+          font-size: 0.52rem;
+          opacity: 0.82;
           line-height: 1.1;
         }
         </style>
@@ -271,7 +278,7 @@ def sidebar_state() -> dict[str, object]:
         "Refresh every (sec)",
         min_value=5,
         max_value=120,
-        value=15,
+        value=5,
         step=5,
         disabled=not auto_refresh_enabled,
     )
@@ -357,9 +364,10 @@ def render_m30_ribbon_card(ribbon: dict) -> None:
         css_class = "ribbon-up" if direction == "UP" else "ribbon-down" if direction == "DOWN" else "ribbon-flat"
         segments.append(
             f'<div class="ribbon-box {css_class}">'
+            f'<div class="ribbon-inline">'
             f'<div class="ribbon-time">{bar.get("timeframe", "")}</div>'
             f'<div class="ribbon-direction">{direction}</div>'
-            f'<div class="ribbon-move">{float(bar.get("move", 0.0)):+.2f} | {bar.get("time", "")}</div>'
+            f'</div>'
             f"</div>"
         )
     ribbon_html = textwrap.dedent(
@@ -450,7 +458,7 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     with override_cols[2]:
         render_metric_card("Override Used", str(len(manual_override.get("used_signal_times", []))), "|".join(manual_override.get("allowed_risk_blockers", [])) or "none")
 
-    live_col, signal_col, ribbon_col = st.columns([1.02, 1.38, 0.40])
+    live_col, signal_col, ribbon_col = st.columns([1.05, 1.50, 0.22])
     with live_col:
         st.subheader("Live Snapshot")
         if live_snapshot.get("enabled"):

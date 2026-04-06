@@ -19,7 +19,7 @@ from run_mt5_research_pipeline import run_mt5_research_pipeline
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--poll-seconds", type=int, default=15, help="How often to check the MT5 exporter CSV.")
+    parser.add_argument("--poll-seconds", type=int, default=5, help="How often to check the MT5 exporter CSV.")
     parser.add_argument("--once", action="store_true", help="Run only one cycle and exit.")
     parser.add_argument("--report-output", default=DEFAULT_MT5_RESEARCH_REPORT_OUTPUT, help="MT5 research report output path.")
     parser.add_argument("--worker-state-output", default=DEFAULT_MT5_RESEARCH_WORKER_STATE_OUTPUT, help="Worker state JSON output.")

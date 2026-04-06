@@ -6,11 +6,15 @@ input string ExportFile = "xauusd_mt5_live.csv";
 input string ExpectedSymbol = "XAUUSD";
 input ENUM_TIMEFRAMES ExportTimeframe = PERIOD_M1;
 input int BarsToExport = 5000;
-input int RefreshSeconds = 15;
+input int RefreshSeconds = 5;
 input bool UseRealVolumeIfAvailable = false;
+input int IntraBarRefreshSeconds = 3;
 
 datetime g_last_exported_bar = 0;
+datetime g_last_export_wallclock = 0;
 bool g_symbol_warning_printed = false;
+double g_last_exported_close = 0.0;
+long g_last_exported_volume = -1;
 
 bool SymbolMatchesExpected()
 {
@@ -77,6 +81,11 @@ void ExportBars()
 
    FileClose(handle);
    g_last_exported_bar = rates[copied - 1].time;
+   g_last_export_wallclock = TimeCurrent();
+   g_last_exported_close = rates[copied - 1].close;
+   g_last_exported_volume = (long)rates[copied - 1].tick_volume;
+   if(UseRealVolumeIfAvailable && rates[copied - 1].real_volume > 0)
+      g_last_exported_volume = (long)rates[copied - 1].real_volume;
    Print("Exporter: wrote ", copied, " bars to ", ExportFile, " for ", _Symbol, " ", EnumToString(ExportTimeframe));
 }
 
@@ -89,7 +98,13 @@ void MaybeExport()
    if(latest_bar == 0)
       return;
 
-   if(g_last_exported_bar == 0 || latest_bar != g_last_exported_bar)
+   double latest_close = iClose(_Symbol, ExportTimeframe, 0);
+   long latest_volume = (long)iVolume(_Symbol, ExportTimeframe, 0);
+   bool new_bar_started = (g_last_exported_bar == 0 || latest_bar != g_last_exported_bar);
+   bool intrabar_state_changed = (latest_close != g_last_exported_close || latest_volume != g_last_exported_volume);
+   bool refresh_due = (g_last_export_wallclock == 0 || (TimeCurrent() - g_last_export_wallclock) >= MathMax(1, IntraBarRefreshSeconds));
+
+   if(new_bar_started || (intrabar_state_changed && refresh_due))
       ExportBars();
 }
 

@@ -200,12 +200,15 @@ def load_live_market_snapshot(
 
 def load_mt5_timeframe_ribbon(mt5_symbol: str = "XAUUSD") -> dict[str, Any]:
     timeframe_rules = [
-        ("M5", "5min"),
-        ("M15", "15min"),
-        ("M30", "30min"),
-        ("H1", "1h"),
-        ("H4", "4h"),
-        ("D1", "1d"),
+        ("M1", "1min", "%d %b %H:%M"),
+        ("M5", "5min", "%d %b %H:%M"),
+        ("M15", "15min", "%d %b %H:%M"),
+        ("M30", "30min", "%d %b %H:%M"),
+        ("H1", "1h", "%d %b %H:%M"),
+        ("H4", "4h", "%d %b %H:%M"),
+        ("D1", "1D", "%d %b"),
+        ("W1", "W-FRI", "%d %b"),
+        ("MN", "ME", "%b %Y"),
     ]
 
     try:
@@ -233,7 +236,7 @@ def load_mt5_timeframe_ribbon(mt5_symbol: str = "XAUUSD") -> dict[str, Any]:
     frame = frame.sort_values("time").set_index("time")
     items: list[dict[str, Any]] = []
 
-    for label, rule in timeframe_rules:
+    for label, rule, time_format in timeframe_rules:
         aggregated = (
             frame.resample(rule, label="right", closed="right")
             .agg(
@@ -251,16 +254,20 @@ def load_mt5_timeframe_ribbon(mt5_symbol: str = "XAUUSD") -> dict[str, Any]:
         if aggregated.empty:
             continue
         latest = aggregated.iloc[-1]
+        previous_close = float(aggregated.iloc[-2]["close"]) if len(aggregated) >= 2 else float(latest["open"])
         open_price = float(latest["open"])
         close_price = float(latest["close"])
-        direction = "UP" if close_price > open_price else "DOWN" if close_price < open_price else "FLAT"
+        direction_move = close_price - previous_close
+        direction = "UP" if direction_move > 0 else "DOWN" if direction_move < 0 else "FLAT"
         items.append(
             {
                 "timeframe": label,
-                "time": pd.Timestamp(latest["time"]).strftime("%d %b %H:%M") if label != "D1" else pd.Timestamp(latest["time"]).strftime("%d %b"),
+                "time": pd.Timestamp(latest["time"]).strftime(time_format),
                 "open": open_price,
                 "close": close_price,
-                "move": close_price - open_price,
+                "move": direction_move,
+                "bar_body_move": close_price - open_price,
+                "previous_close": previous_close,
                 "direction": direction,
                 "color": "#2a8c69" if direction == "UP" else "#b9444b" if direction == "DOWN" else "#b49b57",
             }
