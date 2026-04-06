@@ -8,6 +8,7 @@ much heavier full research retraining loop on every new MT5 bar.
 from __future__ import annotations
 
 import argparse
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -24,6 +25,7 @@ from pipeline_contract import (
     DEFAULT_MT5_RESEARCH_CONFIG,
     DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT,
     DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT,
+    DEFAULT_MT5_RESEARCH_MANUAL_OVERRIDE_OUTPUT,
     DEFAULT_MT5_RESEARCH_OVERLAYS_OUTPUT,
     DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT,
     DEFAULT_MT5_RESEARCH_PREDICTIONS_OUTPUT,
@@ -39,6 +41,7 @@ from run_live_mt5_pipeline import run_live_pipeline
 
 SIGNAL_NAME_MAP = {-1: "SHORT", 0: "HOLD", 1: "LONG"}
 SETUP_NAME_MAP = {-1: "SHORT_SETUP", 0: "NO_TRADE", 1: "LONG_SETUP"}
+OVERRIDEABLE_RISK_BLOCKERS = {"DAILY_TRADE_LIMIT", "DAILY_LOSS_LIMIT"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-output", default=DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT, help="MT5 live paper ledger CSV output.")
     parser.add_argument("--feedback-output", default=DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT, help="Learning feedback CSV output.")
     parser.add_argument("--learning-status-output", default=DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT, help="Learning readiness JSON output.")
+    parser.add_argument("--manual-override-output", default=DEFAULT_MT5_RESEARCH_MANUAL_OVERRIDE_OUTPUT, help="One-time paper-only override JSON state path.")
     parser.add_argument("--report-output", default=DEFAULT_MT5_RESEARCH_REPORT_OUTPUT, help="MT5 live cockpit report JSON output.")
     parser.add_argument("--skip-onnx-runtime-check", action="store_true", help="Skip optional onnxruntime verification.")
     parser.add_argument("--skip-confidence-analysis", action="store_true", help="Skip optional confidence analysis in the fast live path.")
@@ -98,6 +102,71 @@ def directional_signal(short_prob: float, hold_prob: float, long_prob: float, th
 
 def join_reasons(*parts: str) -> str:
     return "|".join(part for part in parts if part)
+
+
+def load_manual_override(path_like: str) -> dict[str, Any]:
+    path = resolve_repo_path(path_like)
+    payload: dict[str, Any] = {}
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+
+    used_signal_times = [
+        str(value)
+        for value in payload.get("used_signal_times", [])
+        if str(value).strip()
+    ]
+    allowed_risk_blockers = [
+        str(value)
+        for value in payload.get("allowed_risk_blockers", sorted(OVERRIDEABLE_RISK_BLOCKERS))
+        if str(value).strip()
+    ]
+    remaining_credits = max(0, int(payload.get("remaining_credits", 0)))
+    initial_credits = max(remaining_credits, int(payload.get("initial_credits", remaining_credits)))
+    return {
+        "enabled": bool(payload.get("enabled", remaining_credits > 0)),
+        "scope": str(payload.get("scope", "paper_only")),
+        "note": str(payload.get("note", "")),
+        "initial_credits": initial_credits,
+        "remaining_credits": remaining_credits,
+        "used_signal_times": used_signal_times,
+        "allowed_risk_blockers": allowed_risk_blockers,
+        "start_after": str(payload.get("start_after", "")).strip(),
+        "last_used_at": str(payload.get("last_used_at", "")).strip(),
+    }
+
+
+def maybe_apply_manual_override(
+    signal_time: pd.Timestamp,
+    risk_blockers: list[str],
+    manual_override: dict[str, Any],
+) -> tuple[bool, str]:
+    if not risk_blockers or not manual_override.get("enabled", False):
+        return False, ""
+
+    allowed = set(str(value) for value in manual_override.get("allowed_risk_blockers", []))
+    if not set(risk_blockers).issubset(allowed):
+        return False, ""
+
+    start_after_raw = str(manual_override.get("start_after", "")).strip()
+    if start_after_raw:
+        start_after = pd.to_datetime(start_after_raw, errors="coerce")
+        if pd.notna(start_after) and signal_time <= start_after:
+            return False, ""
+
+    signal_key = str(signal_time)
+    used_signal_times = set(str(value) for value in manual_override.get("used_signal_times", []))
+    if signal_key in used_signal_times:
+        return True, "|".join(risk_blockers)
+
+    remaining_credits = int(manual_override.get("remaining_credits", 0))
+    if remaining_credits <= 0:
+        return False, ""
+
+    manual_override["remaining_credits"] = remaining_credits - 1
+    manual_override.setdefault("used_signal_times", []).append(signal_key)
+    manual_override["last_used_at"] = signal_key
+    return True, "|".join(risk_blockers)
 
 
 def _normalize_triplet(short_prob: np.ndarray, hold_prob: np.ndarray, long_prob: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -299,6 +368,8 @@ def build_prediction_frame(validation_df: pd.DataFrame, config: dict[str, Any]) 
     frame["paper_status"] = np.where(frame["recommended_trade"].isin(["LONG", "SHORT"]), "SIGNAL_READY", "BLOCKED")
     frame["paper_reason_blocked"] = np.where(frame["recommended_trade"].isin(["LONG", "SHORT"]), "", frame["reason_blocked"])
     frame["paper_trade_id"] = pd.Series([pd.NA] * len(frame), dtype="object")
+    frame["manual_override_used"] = False
+    frame["manual_override_reason"] = ""
     return frame.sort_values("time").reset_index(drop=True)
 
 
@@ -315,9 +386,15 @@ def calculate_max_drawdown(equity_curve: list[dict[str, Any]]) -> float:
     return max_dd
 
 
-def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def simulate_paper_trades(
+    predictions: pd.DataFrame,
+    raw_frame: pd.DataFrame,
+    config: dict[str, Any],
+    manual_override: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
     paper_cfg = config["trading"]["paper"]
     labels_cfg = config["labels"]
+    override_state = dict(manual_override or {})
 
     working = predictions.copy().sort_values("time").reset_index(drop=True)
     raw = raw_frame.copy().sort_values("time").reset_index(drop=True)
@@ -343,20 +420,6 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
         if row["recommended_trade"] not in {"LONG", "SHORT"}:
             continue
 
-        risk_blockers: list[str] = []
-        if next_available_time is not None and signal_time <= next_available_time:
-            risk_blockers.append("OPEN_TRADE_ACTIVE")
-        if daily_trade_count[signal_day] >= max_trades_per_day:
-            risk_blockers.append("DAILY_TRADE_LIMIT")
-        if daily_loss_streak[signal_day] >= daily_loss_stop:
-            risk_blockers.append("DAILY_LOSS_LIMIT")
-
-        if risk_blockers:
-            working.at[index, "paper_status"] = "BLOCKED_BY_RISK"
-            working.at[index, "paper_reason_blocked"] = join_reasons(str(working.at[index, "paper_reason_blocked"]), *risk_blockers)
-            continue
-
-        trade_id += 1
         entry_price = float(row["entry_price"])
         stop_price = float(row["stop_loss"])
         tp1 = float(row["tp1"])
@@ -366,6 +429,25 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
             working.at[index, "paper_status"] = "BLOCKED_BY_RISK"
             working.at[index, "paper_reason_blocked"] = join_reasons(str(working.at[index, "paper_reason_blocked"]), "INVALID_STOP_DISTANCE")
             continue
+
+        risk_blockers: list[str] = []
+        if next_available_time is not None and signal_time <= next_available_time:
+            risk_blockers.append("OPEN_TRADE_ACTIVE")
+        if daily_trade_count[signal_day] >= max_trades_per_day:
+            risk_blockers.append("DAILY_TRADE_LIMIT")
+        if daily_loss_streak[signal_day] >= daily_loss_stop:
+            risk_blockers.append("DAILY_LOSS_LIMIT")
+
+        if risk_blockers:
+            override_used, override_reason = maybe_apply_manual_override(signal_time, risk_blockers, override_state)
+            if not override_used:
+                working.at[index, "paper_status"] = "BLOCKED_BY_RISK"
+                working.at[index, "paper_reason_blocked"] = join_reasons(str(working.at[index, "paper_reason_blocked"]), *risk_blockers)
+                continue
+            working.at[index, "manual_override_used"] = True
+            working.at[index, "manual_override_reason"] = override_reason
+
+        trade_id += 1
 
         future_bars = raw.loc[raw["time"] > signal_time].head(max_holding_bars).copy()
         if future_bars.empty:
@@ -380,6 +462,8 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
                 "tp2": tp2,
                 "setup_score": float(row["setup_score"]),
                 "expected_value": float(row["expected_value"]),
+                "manual_override_used": bool(working.at[index, "manual_override_used"]),
+                "manual_override_reason": str(working.at[index, "manual_override_reason"]),
             }
             working.at[index, "paper_trade_id"] = open_trade_summary["trade_id"]
             break
@@ -455,6 +539,8 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
                 "tp2": tp2,
                 "setup_score": float(row["setup_score"]),
                 "expected_value": float(row["expected_value"]),
+                "manual_override_used": bool(working.at[index, "manual_override_used"]),
+                "manual_override_reason": str(working.at[index, "manual_override_reason"]),
             }
             next_available_time = future_bars.iloc[-1]["time"]
             continue
@@ -494,6 +580,8 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
                 "pnl_cash": float(pnl_cash),
                 "equity_before": float(equity),
                 "equity_after": float(equity_after),
+                "manual_override_used": bool(working.at[index, "manual_override_used"]),
+                "manual_override_reason": str(working.at[index, "manual_override_reason"]),
             }
         )
         equity_curve.append({"time": exit_time, "equity": float(equity_after)})
@@ -513,7 +601,7 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
             "equity_curve": [],
             "open_trade": open_trade_summary,
         }
-        return working, ledger, summary
+        return working, ledger, summary, override_state
 
     positive_r = ledger.loc[ledger["realized_r"] > 0, "realized_r"].sum()
     negative_r = ledger.loc[ledger["realized_r"] < 0, "realized_r"].sum()
@@ -529,7 +617,7 @@ def simulate_paper_trades(predictions: pd.DataFrame, raw_frame: pd.DataFrame, co
         "equity_curve": equity_curve,
         "open_trade": open_trade_summary,
     }
-    return working, ledger, summary
+    return working, ledger, summary, override_state
 
 
 def build_session_profile(predictions: pd.DataFrame) -> dict[str, Any]:
@@ -734,6 +822,7 @@ def build_report(
     paper_summary: dict[str, Any],
     feedback: pd.DataFrame,
     learning_status: dict[str, Any],
+    manual_override: dict[str, Any],
     predictions_output: str,
     overlays_output: str,
     paper_output: str,
@@ -819,6 +908,17 @@ def build_report(
         "paper_trading": paper_summary,
         "backtest": paper_summary,
         "learning": learning_status,
+        "manual_override": {
+            "enabled": bool(manual_override.get("enabled", False)),
+            "scope": str(manual_override.get("scope", "paper_only")),
+            "remaining_credits": int(manual_override.get("remaining_credits", 0)),
+            "initial_credits": int(manual_override.get("initial_credits", 0)),
+            "used_signal_times": [str(value) for value in manual_override.get("used_signal_times", [])],
+            "start_after": str(manual_override.get("start_after", "")),
+            "last_used_at": str(manual_override.get("last_used_at", "")),
+            "allowed_risk_blockers": [str(value) for value in manual_override.get("allowed_risk_blockers", [])],
+            "note": str(manual_override.get("note", "")),
+        },
         "baseline": {
             "walk_forward_splits": "live_window",
             "horizons": baseline_horizons,
@@ -885,6 +985,7 @@ def run_mt5_research_pipeline(
     paper_output: str = DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT,
     feedback_output: str = DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT,
     learning_status_output: str = DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT,
+    manual_override_output: str = DEFAULT_MT5_RESEARCH_MANUAL_OVERRIDE_OUTPUT,
     report_output: str = DEFAULT_MT5_RESEARCH_REPORT_OUTPUT,
     skip_onnx_runtime_check: bool = False,
     skip_confidence_analysis: bool = False,
@@ -914,11 +1015,13 @@ def run_mt5_research_pipeline(
     feature_subset = feature_df.loc[:, [column for column in base_columns if column in feature_df.columns]].copy()
     validation_df = validation_df.merge(feature_subset, on="time", how="left")
     raw_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_RAW_INPUT))
+    manual_override = load_manual_override(manual_override_output)
     predictions = build_prediction_frame(validation_df, config_payload)
     overlays = build_overlay_objects(predictions)
-    predictions, paper_ledger, paper_summary = simulate_paper_trades(predictions, raw_df, config_payload)
+    predictions, paper_ledger, paper_summary, manual_override = simulate_paper_trades(predictions, raw_df, config_payload, manual_override)
     feedback = build_learning_feedback(predictions, paper_ledger)
     learning_status = build_learning_status(feedback, config_payload)
+    json_dump(manual_override, manual_override_output)
     report = build_report(
         live_report=live_report,
         predictions=predictions,
@@ -927,6 +1030,7 @@ def run_mt5_research_pipeline(
         paper_summary=paper_summary,
         feedback=feedback,
         learning_status=learning_status,
+        manual_override=manual_override,
         predictions_output=predictions_output,
         overlays_output=overlays_output,
         paper_output=paper_output,
@@ -956,12 +1060,14 @@ def print_research_summary(report: dict[str, Any]) -> None:
     paper = report["paper_trading"]
     dataset = report["dataset_summary"]
     source = report["mt5_live_source"]
+    override = report.get("manual_override", {})
 
     print()
     print("MT5 local cockpit report ready.")
     print(f"Source      : {source['provider']} {source['symbol']} {source['start']} -> {source['end']}")
     print(f"Predictions : {dataset['prediction_rows']}")
     print(f"Paper trades: {paper['trade_count']}")
+    print(f"Override    : {int(override.get('remaining_credits', 0))} credits remaining")
     print(f"Learning    : {'READY' if report['learning']['retrain_ready'] else 'NOT_READY'} ({', '.join(report['learning']['retrain_blockers']) or 'all checks passed'})")
     print(f"Latest      : {latest['signal']} @ {latest['time']}")
     print(f"Gate        : {latest['gate_status']} | {latest['reason_blocked'] or 'tradeable'}")
@@ -996,6 +1102,7 @@ def main() -> None:
         paper_output=args.paper_output,
         feedback_output=args.feedback_output,
         learning_status_output=args.learning_status_output,
+        manual_override_output=args.manual_override_output,
         report_output=args.report_output,
         skip_onnx_runtime_check=args.skip_onnx_runtime_check,
         skip_confidence_analysis=args.skip_confidence_analysis,

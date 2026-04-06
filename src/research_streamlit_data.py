@@ -198,6 +198,83 @@ def load_live_market_snapshot(
     }
 
 
+def load_mt5_timeframe_ribbon(mt5_symbol: str = "XAUUSD") -> dict[str, Any]:
+    timeframe_rules = [
+        ("M5", "5min"),
+        ("M15", "15min"),
+        ("M30", "30min"),
+        ("H1", "1h"),
+        ("H4", "4h"),
+        ("D1", "1d"),
+    ]
+
+    try:
+        payload = fetch_recent_rates(
+            symbol=mt5_symbol or "XAUUSD",
+            timeframe="M1",
+            count=5000,
+        )
+        frame = payload["frame"].copy()
+        source_note = "Direct MT5 live bars aggregated locally across multiple timeframes."
+        provider = "mt5_bridge"
+    except Exception:
+        try:
+            fallback = load_exported_rates_csv(symbol=mt5_symbol or "XAUUSD", timeframe="M1")
+            frame = fallback["frame"].copy()
+            source_note = "MT5 exporter M1 feed aggregated locally across multiple timeframes."
+            provider = "mt5_export_resampled"
+        except Exception as exc:
+            return {
+                "enabled": False,
+                "error": f"Could not build MT5 timeframe ribbon: {exc}",
+            }
+
+    frame["time"] = pd.to_datetime(frame["time"])
+    frame = frame.sort_values("time").set_index("time")
+    items: list[dict[str, Any]] = []
+
+    for label, rule in timeframe_rules:
+        aggregated = (
+            frame.resample(rule, label="right", closed="right")
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna()
+            .reset_index()
+        )
+        if aggregated.empty:
+            continue
+        latest = aggregated.iloc[-1]
+        open_price = float(latest["open"])
+        close_price = float(latest["close"])
+        direction = "UP" if close_price > open_price else "DOWN" if close_price < open_price else "FLAT"
+        items.append(
+            {
+                "timeframe": label,
+                "time": pd.Timestamp(latest["time"]).strftime("%d %b %H:%M") if label != "D1" else pd.Timestamp(latest["time"]).strftime("%d %b"),
+                "open": open_price,
+                "close": close_price,
+                "move": close_price - open_price,
+                "direction": direction,
+                "color": "#2a8c69" if direction == "UP" else "#b9444b" if direction == "DOWN" else "#b49b57",
+            }
+        )
+
+    return {
+        "enabled": True,
+        "provider": provider,
+        "symbol": mt5_symbol or "XAUUSD",
+        "bars": items,
+        "note": source_note,
+    }
+
+
 def build_probability_figure(predictions: pd.DataFrame, bars: int = 180) -> Any:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots

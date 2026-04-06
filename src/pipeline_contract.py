@@ -93,6 +93,7 @@ DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT = "data/live/research_mt5/xauusd_learning_f
 DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT = "data/live/research_mt5/learning_status.json"
 DEFAULT_MT5_RESEARCH_PROMOTION_DECISION_OUTPUT = "data/live/research_mt5/promotion_decision.json"
 DEFAULT_MT5_RESEARCH_WORKER_STATE_OUTPUT = "data/live/research_mt5/worker_state.json"
+DEFAULT_MT5_RESEARCH_MANUAL_OVERRIDE_OUTPUT = "data/live/research_mt5/manual_override.json"
 DEFAULT_RESEARCH_BASELINE_DIR = "python_training/models/research/baseline"
 DEFAULT_RESEARCH_NEURAL_DIR = "python_training/models/research/patchtst"
 DEFAULT_RESEARCH_ENSEMBLE_DIR = "python_training/models/research/ensemble"

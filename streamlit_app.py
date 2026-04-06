@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import textwrap
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -30,6 +32,7 @@ from research_streamlit_data import (
     build_session_profile_figure,
     build_walk_forward_table,
     load_live_market_snapshot,
+    load_mt5_timeframe_ribbon,
     load_research_bundle,
 )
 
@@ -113,6 +116,53 @@ def inject_styles() -> None:
           font-size: 0.90rem;
           color: rgba(24,36,47,0.72);
         }
+
+        .ribbon-stack {
+          display: flex;
+          flex-direction: column;
+          gap: 0.28rem;
+        }
+
+        .ribbon-box {
+          border-radius: 10px;
+          padding: 0.32rem 0.45rem;
+          border: 1px solid rgba(24,36,47,0.10);
+          box-shadow: 0 5px 14px rgba(24, 36, 47, 0.04);
+          color: #fffaf0;
+        }
+
+        .ribbon-up {
+          background: linear-gradient(135deg, rgba(42,140,105,0.96), rgba(24,112,84,0.96));
+        }
+
+        .ribbon-down {
+          background: linear-gradient(135deg, rgba(185,68,75,0.96), rgba(138,42,49,0.96));
+        }
+
+        .ribbon-flat {
+          background: linear-gradient(135deg, rgba(180,155,87,0.96), rgba(149,123,58,0.96));
+        }
+
+        .ribbon-time {
+          font-size: 0.62rem;
+          opacity: 0.82;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          line-height: 1.1;
+        }
+
+        .ribbon-direction {
+          font-size: 0.82rem;
+          font-weight: 700;
+          letter-spacing: 0.05em;
+          line-height: 1.1;
+        }
+
+        .ribbon-move {
+          font-size: 0.68rem;
+          opacity: 0.88;
+          line-height: 1.1;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -132,16 +182,46 @@ def render_metric_card(label: str, value: str, note: str = "") -> None:
     )
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def cached_bundle(report_path: str) -> dict:
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_bundle(report_path: str, refresh_key: int = 0) -> dict:
     return load_research_bundle(report_path)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def cached_live_snapshot(provider: str, symbol: str, mt5_symbol: str, outputsize: int, enabled: bool) -> dict:
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_live_snapshot(provider: str, symbol: str, mt5_symbol: str, outputsize: int, enabled: bool, refresh_key: int = 0) -> dict:
     if not enabled:
         return {"enabled": False, "error": "Live snapshot disabled in the sidebar."}
     return load_live_market_snapshot(provider=provider, symbol=symbol, mt5_symbol=mt5_symbol, outputsize=outputsize)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_mt5_timeframe_ribbon(mt5_symbol: str, enabled: bool, refresh_key: int = 0) -> dict:
+    if not enabled:
+        return {"enabled": False, "error": "Ribbon disabled because live market snapshot is turned off."}
+    return load_mt5_timeframe_ribbon(mt5_symbol=mt5_symbol)
+
+
+def build_refresh_key(settings: dict[str, object]) -> int:
+    if not bool(settings.get("auto_refresh_enabled", False)):
+        return 0
+    interval = max(5, int(settings.get("auto_refresh_seconds", 15)))
+    return int(time.time() // interval)
+
+
+def get_auto_refresh_run_every(settings: dict[str, object]) -> str | None:
+    if not bool(settings.get("auto_refresh_enabled", False)):
+        return None
+    interval = max(5, int(settings.get("auto_refresh_seconds", 15)))
+    return f"{interval}s"
+
+
+def get_ui_settings() -> dict[str, object]:
+    settings = st.session_state.get("_ui_settings")
+    if isinstance(settings, dict):
+        return settings
+    settings = sidebar_state()
+    st.session_state["_ui_settings"] = settings
+    return settings
 
 
 def resolve_active_report_path(report_source: str, live_provider: str, custom_path: str) -> str:
@@ -186,6 +266,15 @@ def sidebar_state() -> dict[str, object]:
         default_symbol = "XAU/USD"
     live_symbol = st.sidebar.text_input("Live symbol / instrument", value=default_symbol, key=f"live_symbol_{live_provider.lower().replace(' ', '_')}")
     live_window = st.sidebar.slider("Live snapshot bars", min_value=20, max_value=240, value=120, step=20)
+    auto_refresh_enabled = st.sidebar.toggle("Auto refresh live UI", value=True)
+    auto_refresh_seconds = st.sidebar.slider(
+        "Refresh every (sec)",
+        min_value=5,
+        max_value=120,
+        value=15,
+        step=5,
+        disabled=not auto_refresh_enabled,
+    )
     if st.sidebar.button("Refresh cached data"):
         st.cache_data.clear()
 
@@ -223,13 +312,15 @@ def sidebar_state() -> dict[str, object]:
         "live_symbol": live_symbol,
         "mt5_symbol": live_symbol if live_provider == "MT5 Local" else "XAUUSD",
         "live_window": live_window,
+        "auto_refresh_enabled": auto_refresh_enabled,
+        "auto_refresh_seconds": auto_refresh_seconds,
     }
 
 
-def load_page_state() -> tuple[dict, pd.DataFrame, pd.DataFrame, dict, dict]:
-    settings = sidebar_state()
+def load_page_state(settings: dict[str, object]) -> tuple[dict, pd.DataFrame, pd.DataFrame, dict, dict]:
+    refresh_key = build_refresh_key(settings)
     try:
-        bundle = cached_bundle(str(settings["report_path"]))
+        bundle = cached_bundle(str(settings["report_path"]), refresh_key=refresh_key)
     except FileNotFoundError:
         st.error("Research report not found yet. Run the research pipeline first.")
         st.stop()
@@ -247,8 +338,36 @@ def load_page_state() -> tuple[dict, pd.DataFrame, pd.DataFrame, dict, dict]:
         str(settings["mt5_symbol"]),
         int(settings["live_window"]),
         bool(settings["live_enabled"]),
+        refresh_key=refresh_key,
     )
-    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot}
+    mt5_ribbon = cached_mt5_timeframe_ribbon(str(settings["mt5_symbol"]), bool(settings["live_enabled"]), refresh_key=refresh_key)
+    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot, "_mt5_m30_ribbon": mt5_ribbon}
+
+
+def render_m30_ribbon_card(ribbon: dict) -> None:
+    st.subheader("MT5 Timeframes")
+    if not ribbon.get("enabled"):
+        st.info(ribbon.get("error", "M30 ribbon unavailable."))
+        return
+
+    st.caption(f"{ribbon.get('symbol', 'XAUUSD')} live")
+    segments = []
+    for bar in ribbon.get("bars", []):
+        direction = str(bar.get("direction", "FLAT")).upper()
+        css_class = "ribbon-up" if direction == "UP" else "ribbon-down" if direction == "DOWN" else "ribbon-flat"
+        segments.append(
+            f'<div class="ribbon-box {css_class}">'
+            f'<div class="ribbon-time">{bar.get("timeframe", "")}</div>'
+            f'<div class="ribbon-direction">{direction}</div>'
+            f'<div class="ribbon-move">{float(bar.get("move", 0.0)):+.2f} | {bar.get("time", "")}</div>'
+            f"</div>"
+        )
+    ribbon_html = textwrap.dedent(
+        f"""
+        <div class="ribbon-stack">{''.join(segments)}</div>
+        """
+    ).strip()
+    st.markdown(ribbon_html, unsafe_allow_html=True)
 
 
 def render_header(report: dict) -> None:
@@ -286,11 +405,13 @@ def render_header(report: dict) -> None:
     )
 
 
-def render_dashboard() -> None:
-    settings, predictions, paper_ledger, report, overlay_bundle = load_page_state()
+def render_dashboard_page(settings: dict[str, object]) -> None:
+    _, predictions, paper_ledger, report, overlay_bundle = load_page_state(settings)
     live_snapshot = overlay_bundle["_live_snapshot"]
+    mt5_ribbon = overlay_bundle["_mt5_m30_ribbon"]
     latest = report.get("latest_signal", {})
     learning = report.get("learning", {})
+    manual_override = report.get("manual_override", {})
     render_header(report)
 
     top_cols = st.columns(6)
@@ -321,7 +442,15 @@ def render_dashboard() -> None:
         blockers = learning.get("retrain_blockers", [])
         render_metric_card("Learning Gate", str(len(blockers)), "all checks passed" if not blockers else "|".join(blockers))
 
-    live_col, signal_col = st.columns([1.0, 1.4])
+    override_cols = st.columns([1.0, 1.2, 1.0])
+    with override_cols[0]:
+        render_metric_card("Override Credits", str(int(manual_override.get("remaining_credits", 0))), "paper-only extra trades")
+    with override_cols[1]:
+        render_metric_card("Override Start", str(manual_override.get("start_after", "") or "immediate"), "future signals only")
+    with override_cols[2]:
+        render_metric_card("Override Used", str(len(manual_override.get("used_signal_times", []))), "|".join(manual_override.get("allowed_risk_blockers", [])) or "none")
+
+    live_col, signal_col, ribbon_col = st.columns([1.02, 1.38, 0.40])
     with live_col:
         st.subheader("Live Snapshot")
         if live_snapshot.get("enabled"):
@@ -349,6 +478,8 @@ def render_dashboard() -> None:
         st.dataframe(decision_frame, width="stretch", hide_index=True)
         st.caption(f"Blocked reasons: {latest.get('reason_blocked', 'none') or 'none'}")
         st.caption(f"Confluence tags: {latest.get('confluence_tags', 'N/A')}")
+    with ribbon_col:
+        render_m30_ribbon_card(mt5_ribbon)
 
     st.subheader("Probability Curves")
     st.plotly_chart(
@@ -376,8 +507,8 @@ def render_dashboard() -> None:
         st.dataframe(paper_table, width="stretch", hide_index=True)
 
 
-def render_chart_structure() -> None:
-    settings, predictions, _, report, overlay_bundle = load_page_state()
+def render_chart_structure_page(settings: dict[str, object]) -> None:
+    _, predictions, _, report, overlay_bundle = load_page_state(settings)
     render_header(report)
     st.subheader("Market Structure And Execution Geometry")
     st.plotly_chart(
@@ -410,8 +541,8 @@ def render_chart_structure() -> None:
         )
 
 
-def render_sessions_psychology() -> None:
-    _, predictions, paper_ledger, report, _ = load_page_state()
+def render_sessions_psychology_page(settings: dict[str, object]) -> None:
+    _, predictions, paper_ledger, report, _ = load_page_state(settings)
     render_header(report)
     st.subheader("Session Behavior, Flow Proxies, And Timing Psychology")
     upper = st.columns(2)
@@ -442,8 +573,8 @@ def render_sessions_psychology() -> None:
         st.dataframe(session_scoreboard, width="stretch", hide_index=True)
 
 
-def render_model_lab() -> None:
-    _, predictions, _, report, _ = load_page_state()
+def render_model_lab_page(settings: dict[str, object]) -> None:
+    _, predictions, _, report, _ = load_page_state(settings)
     render_header(report)
     st.subheader("Model Lab")
 
@@ -500,8 +631,8 @@ def render_model_lab() -> None:
         st.caption("Neural notes: " + " | ".join(str(note) for note in neural["notes"]))
 
 
-def render_backtest_walkforward() -> None:
-    _, predictions, paper_ledger, report, _ = load_page_state()
+def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
+    _, predictions, paper_ledger, report, _ = load_page_state(settings)
     render_header(report)
     st.subheader("Paper Trading And Walk-Forward Evidence")
 
@@ -539,7 +670,64 @@ def render_backtest_walkforward() -> None:
         st.dataframe(blocked, width="stretch", hide_index=True)
 
 
+def render_dashboard() -> None:
+    settings = get_ui_settings()
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _dashboard_fragment() -> None:
+        render_dashboard_page(settings)
+
+    _dashboard_fragment()
+
+
+def render_chart_structure() -> None:
+    settings = get_ui_settings()
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _chart_structure_fragment() -> None:
+        render_chart_structure_page(settings)
+
+    _chart_structure_fragment()
+
+
+def render_sessions_psychology() -> None:
+    settings = get_ui_settings()
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _sessions_fragment() -> None:
+        render_sessions_psychology_page(settings)
+
+    _sessions_fragment()
+
+
+def render_model_lab() -> None:
+    settings = get_ui_settings()
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _model_lab_fragment() -> None:
+        render_model_lab_page(settings)
+
+    _model_lab_fragment()
+
+
+def render_backtest_walkforward() -> None:
+    settings = get_ui_settings()
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _backtest_fragment() -> None:
+        render_backtest_walkforward_page(settings)
+
+    _backtest_fragment()
+
+
 inject_styles()
+app_settings = sidebar_state()
+st.session_state["_ui_settings"] = app_settings
 pages = [
     st.Page(render_dashboard, title="Dashboard", url_path="", default=True),
     st.Page(render_chart_structure, title="Chart / Structure"),

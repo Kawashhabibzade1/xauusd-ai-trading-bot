@@ -24,7 +24,7 @@ fi
 pkill -f "src/run_mt5_research_worker.py" || true
 pkill -f "streamlit run streamlit_app.py --server.headless true --server.port 8502" || true
 
-nohup env PYTHONPATH=src "$PY_BIN" -u src/run_mt5_research_worker.py --poll-seconds 30 > "$LOG_DIR/mt5_worker.log" 2>&1 &
+nohup env PYTHONPATH=src "$PY_BIN" -u src/run_mt5_research_worker.py --poll-seconds 10 > "$LOG_DIR/mt5_worker.log" 2>&1 &
 WORKER_PID=$!
 
 nohup env PYTHONPATH=src "$STREAMLIT_BIN" run streamlit_app.py --server.headless true --server.port 8502 > "$LOG_DIR/streamlit.log" 2>&1 &
