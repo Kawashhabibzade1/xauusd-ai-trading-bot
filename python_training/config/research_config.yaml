@@ -71,6 +71,16 @@ ensemble:
     expected_value: 0.15
 
 trading:
+  hunt_timezone: "Europe/Berlin"
+  hunt_windows:
+    - name: "Morning Hunt"
+      start: "07:45"
+      end: "13:00"
+      max_trades: 2
+    - name: "Afternoon Hunt"
+      start: "15:00"
+      end: "17:00"
+      max_trades: 2
   allowed_sessions: ["London", "New York", "Overlap"]
   min_entry_quality: 0.35
   min_setup_score: 0.58
@@ -79,5 +89,5 @@ trading:
     risk_per_trade: 0.0025
     max_open_trades: 1
     max_trades_per_day: 4
-    daily_loss_streak_stop: 2
+    daily_loss_streak_stop: 3
     max_holding_bars: 60

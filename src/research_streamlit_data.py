@@ -13,6 +13,8 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from pipeline_contract import (
+    DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
+    DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT,
     DEFAULT_RESEARCH_OVERLAYS_OUTPUT,
     DEFAULT_RESEARCH_PAPER_LEDGER_OUTPUT,
     DEFAULT_RESEARCH_PREDICTIONS_OUTPUT,
@@ -41,6 +43,8 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     predictions_path = outputs.get("predictions_output", DEFAULT_RESEARCH_PREDICTIONS_OUTPUT)
     overlays_path = outputs.get("overlays_output", DEFAULT_RESEARCH_OVERLAYS_OUTPUT)
     paper_path = outputs.get("paper_output", DEFAULT_RESEARCH_PAPER_LEDGER_OUTPUT)
+    trade_history_path = outputs.get("trade_history_output", DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT)
+    final_trade_ledger_path = outputs.get("final_trade_ledger_output", "")
 
     predictions = pd.read_csv(resolve_repo_path(predictions_path))
     if "time" in predictions.columns:
@@ -57,12 +61,38 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     else:
         paper_ledger = pd.DataFrame()
 
+    trade_history_resolved = resolve_repo_path(trade_history_path)
+    if trade_history_resolved.exists() and trade_history_resolved.stat().st_size > 0:
+        try:
+            trade_history = pd.read_csv(trade_history_resolved)
+        except EmptyDataError:
+            trade_history = pd.DataFrame()
+        for column in ("signal_time", "entry_time", "exit_time", "snapshot_created_at"):
+            if column in trade_history.columns:
+                trade_history[column] = pd.to_datetime(trade_history[column], errors="coerce")
+    else:
+        trade_history = pd.DataFrame()
+
+    final_trade_ledger_resolved = resolve_repo_path(final_trade_ledger_path or DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT)
+    if final_trade_ledger_resolved.exists() and final_trade_ledger_resolved.stat().st_size > 0:
+        try:
+            final_trade_ledger = pd.read_csv(final_trade_ledger_resolved)
+        except EmptyDataError:
+            final_trade_ledger = pd.DataFrame()
+        for column in ("signal_time", "entry_time", "exit_time", "snapshot_created_at", "source_end"):
+            if column in final_trade_ledger.columns:
+                final_trade_ledger[column] = pd.to_datetime(final_trade_ledger[column], errors="coerce")
+    else:
+        final_trade_ledger = trade_history.copy()
+
     overlays = _load_json(overlays_path)
     latest_signal = report.get("latest_signal", {})
     return {
         "report": report,
         "predictions": predictions,
         "paper_ledger": paper_ledger,
+        "trade_history": trade_history,
+        "final_trade_ledger": final_trade_ledger,
         "overlays": overlays,
         "latest_signal": latest_signal,
         "paths": {
@@ -70,6 +100,8 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
             "predictions": predictions_path,
             "overlays": overlays_path,
             "paper": paper_path,
+            "trade_history": trade_history_path,
+            "final_trade_ledger": final_trade_ledger_path or DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
         },
     }
 
@@ -727,3 +759,249 @@ def build_paper_ledger_table(paper_ledger: pd.DataFrame, limit: int = 25) -> pd.
         if column in table.columns:
             table[column] = table[column].astype(str)
     return table.iloc[::-1].reset_index(drop=True)
+
+
+def _summarize_trade_frame(frame: pd.DataFrame) -> dict[str, float | int]:
+    if frame.empty:
+        return {
+            "trade_count": 0,
+            "wins": 0,
+            "losses": 0,
+            "flats": 0,
+            "net_pnl": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            "win_rate": 0.0,
+        }
+
+    realized = pd.to_numeric(frame.get("realized_r", pd.Series(index=frame.index, dtype="float64")), errors="coerce").fillna(0.0)
+    pnl = pd.to_numeric(frame.get("pnl_cash", pd.Series(index=frame.index, dtype="float64")), errors="coerce").fillna(0.0)
+    wins = int((realized > 0).sum())
+    losses = int((realized < 0).sum())
+    flats = int((realized == 0).sum())
+    trade_count = int(len(frame))
+    gross_profit = float(pnl[pnl > 0].sum())
+    gross_loss = float(pnl[pnl < 0].sum())
+    return {
+        "trade_count": trade_count,
+        "wins": wins,
+        "losses": losses,
+        "flats": flats,
+        "net_pnl": float(pnl.sum()),
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "win_rate": float(wins / trade_count) if trade_count else 0.0,
+    }
+
+
+def build_trade_period_summary_table(trade_history: pd.DataFrame) -> pd.DataFrame:
+    if trade_history.empty:
+        return pd.DataFrame()
+
+    frame = trade_history.copy()
+    time_column = "exit_time" if "exit_time" in frame.columns and frame["exit_time"].notna().any() else "signal_time"
+    frame["_summary_time"] = pd.to_datetime(frame[time_column], errors="coerce")
+    frame = frame.loc[frame["_summary_time"].notna()].copy()
+    if frame.empty:
+        return pd.DataFrame()
+
+    now = pd.Timestamp.now(tz="Europe/Berlin").tz_localize(None)
+    today_start = now.normalize()
+    week_start = today_start - pd.Timedelta(days=today_start.weekday())
+    month_start = today_start.replace(day=1)
+
+    periods = [
+        ("Today", frame["_summary_time"] >= today_start),
+        ("This Week", frame["_summary_time"] >= week_start),
+        ("This Month", frame["_summary_time"] >= month_start),
+        ("All Saved", pd.Series(True, index=frame.index)),
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for label, mask in periods:
+        summary = _summarize_trade_frame(frame.loc[mask].copy())
+        rows.append(
+            {
+                "Period": label,
+                "Trades": summary["trade_count"],
+                "Wins": summary["wins"],
+                "Losses": summary["losses"],
+                "Flat": summary["flats"],
+                "Win Rate": summary["win_rate"],
+                "Net PnL": summary["net_pnl"],
+                "Gross Profit": summary["gross_profit"],
+                "Gross Loss": summary["gross_loss"],
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 200) -> pd.DataFrame:
+    if trade_history.empty:
+        return trade_history
+
+    ordered = trade_history.sort_values(
+        by=[column for column in ("snapshot_created_at", "exit_time", "signal_time") if column in trade_history.columns],
+        ascending=True,
+    )
+    columns = [
+        "snapshot_created_at",
+        "signal_time",
+        "entry_time",
+        "exit_time",
+        "direction",
+        "session_name",
+        "exit_reason",
+        "realized_r",
+        "pnl_cash",
+        "equity_after",
+        "setup_score",
+        "expected_value",
+    ]
+    table = ordered.loc[:, [column for column in columns if column in ordered.columns]].tail(limit).copy()
+    for column in ("snapshot_created_at", "signal_time", "entry_time", "exit_time"):
+        if column in table.columns:
+            table[column] = table[column].astype(str)
+    return table.iloc[::-1].reset_index(drop=True)
+
+
+# Trader-freundliche Session-Namen für die Buy/Sell-Ansicht
+SESSION_DISPLAY_NAMES = {
+    "Asia": "Tokyo / JPN",
+    "London": "London",
+    "New York": "New York",
+    "Overlap": "London–NY Overlap",
+    "Off Hours": "Off Hours",
+}
+
+
+def _rename_sessions(frame: pd.DataFrame, column: str = "session_name") -> pd.DataFrame:
+    """Map internal session names to trader-friendly display names."""
+    renamed = frame.copy()
+    renamed[column] = renamed[column].map(lambda v: SESSION_DISPLAY_NAMES.get(v, v))
+    return renamed
+
+
+def build_session_buysell_table(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Buy vs Sell signal breakdown per trading session (London, New York, Tokyo/JPN).
+
+    Uses setup_candidate (LONG_SETUP / SHORT_SETUP) as primary signal source,
+    falls back to direction_15m if setup_candidate is unavailable.
+    The raw directional signals show bias BEFORE the risk gate filters."""
+    if "session_name" not in predictions.columns:
+        return pd.DataFrame()
+
+    frame = predictions.copy()
+
+    # Primäre Signal-Quelle: setup_candidate (ungefiltert, vor Gating)
+    if "setup_candidate" in frame.columns:
+        frame["_buy"] = (frame["setup_candidate"] == "LONG_SETUP").astype(int)
+        frame["_sell"] = (frame["setup_candidate"] == "SHORT_SETUP").astype(int)
+    elif "direction_15m" in frame.columns:
+        frame["_buy"] = (frame["direction_15m"] == 1).astype(int)
+        frame["_sell"] = (frame["direction_15m"] == -1).astype(int)
+    else:
+        return pd.DataFrame()
+
+    agg_dict: dict = {
+        "total_bars": ("time", "count"),
+        "buy_setups": ("_buy", "sum"),
+        "sell_setups": ("_sell", "sum"),
+    }
+    if "buy_pressure_proxy" in frame.columns:
+        agg_dict["avg_buy_pressure"] = ("buy_pressure_proxy", "mean")
+    if "sell_pressure_proxy" in frame.columns:
+        agg_dict["avg_sell_pressure"] = ("sell_pressure_proxy", "mean")
+
+    grouped = frame.groupby("session_name", as_index=False).agg(**agg_dict)
+
+    actionable = grouped["buy_setups"] + grouped["sell_setups"]
+    safe_actionable = actionable.replace(0, 1)
+    grouped["buy_pct"] = (grouped["buy_setups"] / safe_actionable * 100).round(1)
+    grouped["sell_pct"] = (grouped["sell_setups"] / safe_actionable * 100).round(1)
+    grouped["dominant"] = np.where(
+        grouped["buy_setups"] > grouped["sell_setups"],
+        "BUY ↑",
+        np.where(grouped["sell_setups"] > grouped["buy_setups"], "SELL ↓", "NEUTRAL"),
+    )
+
+    rename_map = {
+        "session_name": "Session",
+        "total_bars": "Bars",
+        "buy_setups": "Buy Setups",
+        "sell_setups": "Sell Setups",
+        "buy_pct": "Buy %",
+        "sell_pct": "Sell %",
+        "dominant": "Dominant",
+    }
+    if "avg_buy_pressure" in grouped.columns:
+        rename_map["avg_buy_pressure"] = "Avg Buy Pressure"
+    if "avg_sell_pressure" in grouped.columns:
+        rename_map["avg_sell_pressure"] = "Avg Sell Pressure"
+
+    return _rename_sessions(grouped.rename(columns=rename_map), column="Session")
+
+
+def build_session_buysell_figure(predictions: pd.DataFrame) -> Any:
+    """Stacked bar chart: Buy vs Sell setup count per session."""
+    import plotly.graph_objects as go
+
+    if "session_name" not in predictions.columns:
+        figure = go.Figure()
+        figure.update_layout(height=360, paper_bgcolor="#f4f0e8", plot_bgcolor="#fffaf0")
+        return figure
+
+    frame = predictions.copy()
+
+    if "setup_candidate" in frame.columns:
+        frame["_buy"] = (frame["setup_candidate"] == "LONG_SETUP").astype(int)
+        frame["_sell"] = (frame["setup_candidate"] == "SHORT_SETUP").astype(int)
+    elif "direction_15m" in frame.columns:
+        frame["_buy"] = (frame["direction_15m"] == 1).astype(int)
+        frame["_sell"] = (frame["direction_15m"] == -1).astype(int)
+    else:
+        figure = go.Figure()
+        figure.update_layout(height=360, paper_bgcolor="#f4f0e8", plot_bgcolor="#fffaf0")
+        return figure
+
+    grouped = frame.groupby("session_name").agg(
+        buy_setups=("_buy", "sum"),
+        sell_setups=("_sell", "sum"),
+    ).reset_index()
+
+    # Sortierung: Overlap → London → New York → Asia → Off Hours
+    order = ["Overlap", "London", "New York", "Asia", "Off Hours"]
+    grouped["_sort"] = grouped["session_name"].map({name: idx for idx, name in enumerate(order)}).fillna(99)
+    grouped = grouped.sort_values("_sort").drop(columns="_sort")
+
+    grouped = _rename_sessions(grouped)
+    sessions = grouped["session_name"].tolist()
+
+    figure = go.Figure()
+    figure.add_trace(go.Bar(
+        x=sessions,
+        y=grouped["buy_setups"],
+        name="BUY (LONG Setups)",
+        marker_color="#2a8c69",
+        text=grouped["buy_setups"],
+        textposition="inside",
+    ))
+    figure.add_trace(go.Bar(
+        x=sessions,
+        y=grouped["sell_setups"],
+        name="SELL (SHORT Setups)",
+        marker_color="#b9444b",
+        text=grouped["sell_setups"],
+        textposition="inside",
+    ))
+    figure.update_layout(
+        barmode="stack",
+        height=420,
+        title="Buy vs Sell Setups per Session",
+        paper_bgcolor="#f4f0e8",
+        plot_bgcolor="#fffaf0",
+        margin={"l": 20, "r": 20, "t": 50, "b": 20},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.0},
+    )
+    return figure

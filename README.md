@@ -60,6 +60,8 @@ The market-data helpers also fall back to a repo-local `.env` or `.env.local` fi
 OANDA_API_TOKEN=your_oanda_token_here
 OANDA_ENV=practice
 TWELVEDATA_API_KEY=your_key_here
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+TELEGRAM_CHAT_ID=your_telegram_chat_id_here
 MT5_TERMINAL_PATH=/path/to/terminal64.exe
 MT5_LOGIN=12345678
 MT5_PASSWORD=your_password

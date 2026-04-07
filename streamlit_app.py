@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import textwrap
 import time
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -29,7 +30,11 @@ from research_streamlit_data import (
     build_paper_ledger_table,
     build_probability_figure,
     build_recent_signal_table,
+    build_saved_trade_history_table,
+    build_session_buysell_figure,
+    build_session_buysell_table,
     build_session_profile_figure,
+    build_trade_period_summary_table,
     build_walk_forward_table,
     load_live_market_snapshot,
     load_mt5_timeframe_ribbon,
@@ -43,6 +48,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+UTC = ZoneInfo("UTC")
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 
 def inject_styles() -> None:
@@ -75,6 +83,12 @@ def inject_styles() -> None:
           font-family: "Fraunces", serif !important;
           letter-spacing: -0.02em;
           color: var(--ink);
+        }
+
+        /* Automatisches Responsive-Wrapping für die Streamlit-Spalten, 
+           damit die Cards nie zerquetscht werden (verhindert das Kacke-Aussehen) */
+        [data-testid="column"] {
+          min-width: 260px !important;
         }
 
         section[data-testid="stSidebar"] {
@@ -170,6 +184,30 @@ def inject_styles() -> None:
           opacity: 0.82;
           line-height: 1.1;
         }
+
+        .popup-ribbon-container {
+          position: fixed;
+          bottom: 24px;
+          right: 32px;
+          z-index: 99999;
+          background: rgba(24, 36, 47, 0.95);
+          border: 1px solid rgba(255, 250, 240, 0.1);
+          border-radius: 12px;
+          padding: 0.8rem;
+          box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
+          width: 140px;
+        }
+
+        .popup-ribbon-title {
+          font-size: 0.65rem;
+          text-transform: uppercase;
+          color: #fffaf0;
+          opacity: 0.9;
+          margin-bottom: 0.6rem;
+          text-align: center;
+          letter-spacing: 0.05em;
+          font-weight: 600;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -186,6 +224,56 @@ def render_metric_card(label: str, value: str, note: str = "") -> None:
         </div>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def format_utc_and_berlin(timestamp_like: str) -> str:
+    timestamp = str(timestamp_like or "").strip()
+    if not timestamp:
+        return ""
+    parsed = pd.to_datetime(timestamp, errors="coerce")
+    if pd.isna(parsed):
+        return timestamp
+    parsed_utc = parsed.tz_localize(UTC) if parsed.tzinfo is None else parsed.tz_convert(UTC)
+    parsed_berlin = parsed_utc.tz_convert(BERLIN_TZ)
+    return (
+        f"{parsed_utc.strftime('%Y-%m-%d %H:%M:%S UTC')} | "
+        f"{parsed_berlin.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+    )
+
+
+def build_overlap_window_note(report: dict) -> str:
+    mt5_live_source = report.get("mt5_live_source", {})
+    hunt_windows = list(mt5_live_source.get("hunt_windows", []))
+    hunt_timezone = str(mt5_live_source.get("hunt_timezone", "UTC"))
+    if hunt_windows:
+        segments = []
+        for window in hunt_windows:
+            name = str(window.get("name", "Hunt")).strip() or "Hunt"
+            start = str(window.get("start", "")).strip()
+            end = str(window.get("end", "")).strip()
+            max_trades = int(window.get("max_trades", 0) or 0)
+            limit_note = f" max {max_trades}" if max_trades > 0 else ""
+            segments.append(f"{name} {start}-{end} {hunt_timezone}{limit_note}")
+        return "Setup hunt windows: " + " | ".join(segments)
+
+    anchor_raw = str(mt5_live_source.get("end", "") or "")
+    anchor = pd.to_datetime(anchor_raw, errors="coerce")
+    if pd.isna(anchor):
+        anchor = pd.Timestamp.now(tz=UTC)
+    elif anchor.tzinfo is None:
+        anchor = anchor.tz_localize(UTC)
+    else:
+        anchor = anchor.tz_convert(UTC)
+
+    window_start_utc = anchor.normalize() + pd.Timedelta(hours=13)
+    window_end_utc = anchor.normalize() + pd.Timedelta(hours=16, minutes=59)
+    window_start_berlin = window_start_utc.tz_convert(BERLIN_TZ)
+    window_end_berlin = window_end_utc.tz_convert(BERLIN_TZ)
+    return (
+        "Setup hunt window: "
+        f"{window_start_utc.strftime('%H:%M')} - {window_end_utc.strftime('%H:%M')} UTC = "
+        f"{window_start_berlin.strftime('%H:%M')} - {window_end_berlin.strftime('%H:%M %Z')}"
     )
 
 
@@ -337,6 +425,8 @@ def load_page_state(settings: dict[str, object]) -> tuple[dict, pd.DataFrame, pd
 
     predictions = bundle["predictions"]
     paper_ledger = bundle["paper_ledger"]
+    trade_history = bundle.get("trade_history", pd.DataFrame())
+    final_trade_ledger = bundle.get("final_trade_ledger", pd.DataFrame())
     report = bundle["report"]
     overlays = bundle["overlays"]
     live_snapshot = cached_live_snapshot(
@@ -348,16 +438,14 @@ def load_page_state(settings: dict[str, object]) -> tuple[dict, pd.DataFrame, pd
         refresh_key=refresh_key,
     )
     mt5_ribbon = cached_mt5_timeframe_ribbon(str(settings["mt5_symbol"]), bool(settings["live_enabled"]), refresh_key=refresh_key)
-    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot, "_mt5_m30_ribbon": mt5_ribbon}
+    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot, "_mt5_m30_ribbon": mt5_ribbon, "_trade_history": trade_history, "_final_trade_ledger": final_trade_ledger}
 
 
 def render_m30_ribbon_card(ribbon: dict) -> None:
-    st.subheader("MT5 Timeframes")
     if not ribbon.get("enabled"):
-        st.info(ribbon.get("error", "M30 ribbon unavailable."))
         return
 
-    st.caption(f"{ribbon.get('symbol', 'XAUUSD')} live")
+    symbol = ribbon.get('symbol', 'XAUUSD')
     segments = []
     for bar in ribbon.get("bars", []):
         direction = str(bar.get("direction", "FLAT")).upper()
@@ -372,7 +460,10 @@ def render_m30_ribbon_card(ribbon: dict) -> None:
         )
     ribbon_html = textwrap.dedent(
         f"""
-        <div class="ribbon-stack">{''.join(segments)}</div>
+        <div class="popup-ribbon-container">
+          <div class="popup-ribbon-title">{symbol} MT5</div>
+          <div class="ribbon-stack">{''.join(segments)}</div>
+        </div>
         """
     ).strip()
     st.markdown(ribbon_html, unsafe_allow_html=True)
@@ -404,6 +495,7 @@ def render_header(report: dict) -> None:
             f"| rows {int(mt5_live_source.get('rows', 0)):,} "
             f"| {mt5_live_source.get('start', 'n/a')} -> {mt5_live_source.get('end', 'n/a')}"
         )
+        st.caption(build_overlap_window_note(report))
     st.caption(
         f"Rows: standardized {dataset_summary.get('standardized_rows', 0):,} | "
         f"research {dataset_summary.get('research_rows', 0):,} | "
@@ -417,6 +509,7 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     _, predictions, paper_ledger, report, overlay_bundle = load_page_state(settings)
     live_snapshot = overlay_bundle["_live_snapshot"]
     mt5_ribbon = overlay_bundle["_mt5_m30_ribbon"]
+    final_trade_ledger = overlay_bundle.get("_final_trade_ledger", pd.DataFrame())
     latest = report.get("latest_signal", {})
     learning = report.get("learning", {})
     manual_override = report.get("manual_override", {})
@@ -424,7 +517,7 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
 
     top_cols = st.columns(6)
     with top_cols[0]:
-        render_metric_card("Recommended", str(latest.get("signal", "N/A")), latest.get("time", ""))
+        render_metric_card("Recommended", str(latest.get("signal", "N/A")), format_utc_and_berlin(str(latest.get("time", ""))))
     with top_cols[1]:
         render_metric_card("Gate Status", str(latest.get("gate_status", "N/A")), latest.get("session_name", ""))
     with top_cols[2]:
@@ -450,15 +543,46 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         blockers = learning.get("retrain_blockers", [])
         render_metric_card("Learning Gate", str(len(blockers)), "all checks passed" if not blockers else "|".join(blockers))
 
+    capital_cols = st.columns(4)
+    starting_equity = float(paper_summary.get("starting_equity", 0.0))
+    ending_equity = float(paper_summary.get("ending_equity", starting_equity))
+    net_pnl_cash = float(paper_summary.get("net_pnl_cash", ending_equity - starting_equity))
+    with capital_cols[0]:
+        render_metric_card("Capital", f"{ending_equity:.2f}", f"start {starting_equity:.2f}")
+    with capital_cols[1]:
+        render_metric_card("Net PnL", f"{net_pnl_cash:+.2f}", "paper equity delta")
+    with capital_cols[2]:
+        render_metric_card("Wins", str(int(paper_summary.get("win_count", 0))), "closed winners")
+    with capital_cols[3]:
+        render_metric_card("Losses", str(int(paper_summary.get("loss_count", 0))), "closed losers")
+
+    saved_summary = build_trade_period_summary_table(final_trade_ledger)
+    if not saved_summary.empty:
+        st.markdown("#### Frozen Final Trade History")
+        st.caption("These cards use the frozen final ledger, so each closed trade is counted once instead of replaying every reconstructed MT5 run.")
+        history_cols = st.columns(len(saved_summary))
+        for idx, row in saved_summary.reset_index(drop=True).iterrows():
+            note = (
+                f"{int(row['Trades'])} trades | "
+                f"W {int(row['Wins'])} / L {int(row['Losses'])} | "
+                f"PnL {float(row['Net PnL']):+.2f}"
+            )
+            with history_cols[idx]:
+                render_metric_card(str(row["Period"]), f"{float(row['Win Rate']):.1%}", note)
+
     override_cols = st.columns([1.0, 1.2, 1.0])
     with override_cols[0]:
         render_metric_card("Override Credits", str(int(manual_override.get("remaining_credits", 0))), "paper-only extra trades")
     with override_cols[1]:
-        render_metric_card("Override Start", str(manual_override.get("start_after", "") or "immediate"), "future signals only")
+        override_start = str(manual_override.get("start_after", "") or "")
+        override_note = "future signals only"
+        if override_start:
+            override_note = f"after last processed signal | {format_utc_and_berlin(override_start)}"
+        render_metric_card("Override Start", override_start or "immediate", override_note)
     with override_cols[2]:
         render_metric_card("Override Used", str(len(manual_override.get("used_signal_times", []))), "|".join(manual_override.get("allowed_risk_blockers", [])) or "none")
 
-    live_col, signal_col, ribbon_col = st.columns([1.05, 1.50, 0.22])
+    live_col, signal_col = st.columns([1.05, 1.50])
     with live_col:
         st.subheader("Live Snapshot")
         if live_snapshot.get("enabled"):
@@ -486,8 +610,6 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         st.dataframe(decision_frame, width="stretch", hide_index=True)
         st.caption(f"Blocked reasons: {latest.get('reason_blocked', 'none') or 'none'}")
         st.caption(f"Confluence tags: {latest.get('confluence_tags', 'N/A')}")
-    with ribbon_col:
-        render_m30_ribbon_card(mt5_ribbon)
 
     st.subheader("Probability Curves")
     st.plotly_chart(
@@ -550,7 +672,8 @@ def render_chart_structure_page(settings: dict[str, object]) -> None:
 
 
 def render_sessions_psychology_page(settings: dict[str, object]) -> None:
-    _, predictions, paper_ledger, report, _ = load_page_state(settings)
+    _, predictions, paper_ledger, report, overlay_bundle = load_page_state(settings)
+    final_trade_ledger = overlay_bundle.get("_final_trade_ledger", pd.DataFrame())
     render_header(report)
     st.subheader("Session Behavior, Flow Proxies, And Timing Psychology")
     upper = st.columns(2)
@@ -577,8 +700,31 @@ def render_sessions_psychology_page(settings: dict[str, object]) -> None:
             win_rate=("realized_r", lambda values: float((pd.Series(values) > 0).mean())),
             pnl_cash=("pnl_cash", "sum"),
         )
-        st.markdown("#### Session-Wise Paper Scoreboard")
+        st.markdown("#### Current Report Session Scoreboard")
         st.dataframe(session_scoreboard, width="stretch", hide_index=True)
+
+    if not final_trade_ledger.empty:
+        saved_session_scoreboard = final_trade_ledger.groupby("session_name", as_index=False).agg(
+            trades=("final_trade_key", "count") if "final_trade_key" in final_trade_ledger.columns else ("signal_time", "count"),
+            avg_r=("realized_r", "mean"),
+            win_rate=("realized_r", lambda values: float((pd.Series(values) > 0).mean())),
+            pnl_cash=("pnl_cash", "sum"),
+        )
+        st.markdown("#### Frozen Final Session Scoreboard")
+        st.caption("This scoreboard uses the frozen final ledger so each session trade is counted only once.")
+        st.dataframe(saved_session_scoreboard, width="stretch", hide_index=True)
+
+    st.markdown("---")
+    st.subheader("Session Buy / Sell Breakdown")
+    buysell_chart_col, buysell_table_col = st.columns([1.0, 1.2])
+    with buysell_chart_col:
+        st.plotly_chart(build_session_buysell_figure(predictions), width="stretch")
+    with buysell_table_col:
+        buysell_table = build_session_buysell_table(predictions)
+        if buysell_table.empty:
+            st.info("No session buy/sell data available.")
+        else:
+            st.dataframe(buysell_table, width="stretch", hide_index=True)
 
 
 def render_model_lab_page(settings: dict[str, object]) -> None:
@@ -640,7 +786,8 @@ def render_model_lab_page(settings: dict[str, object]) -> None:
 
 
 def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
-    _, predictions, paper_ledger, report, _ = load_page_state(settings)
+    _, predictions, paper_ledger, report, overlay_bundle = load_page_state(settings)
+    final_trade_ledger = overlay_bundle.get("_final_trade_ledger", pd.DataFrame())
     render_header(report)
     st.subheader("Paper Trading And Walk-Forward Evidence")
 
@@ -661,14 +808,32 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
 
     walk_forward = build_walk_forward_table(report)
     st.markdown("#### Walk-Forward Fold Metrics")
-    st.dataframe(walk_forward, width="stretch", hide_index=True)
+    if walk_forward.empty:
+        st.info("Walk-forward fold metrics are not available in the current MT5 live paper mode.")
+    else:
+        st.dataframe(walk_forward, width="stretch", hide_index=True)
 
-    st.markdown("#### Closed Paper Trades")
+    st.markdown("#### Frozen Final Trade Summary")
+    period_summary = build_trade_period_summary_table(final_trade_ledger)
+    if period_summary.empty:
+        st.info("No frozen final trades are available yet.")
+    else:
+        st.caption("These numbers come from the frozen final ledger, not from the latest reconstructed run only.")
+        st.dataframe(period_summary, width="stretch", hide_index=True)
+
+    st.markdown("#### Current Report Closed Paper Trades")
     paper_table = build_paper_ledger_table(paper_ledger, limit=25)
     if paper_table.empty:
         st.info("No closed paper trades are present in the current report window.")
     else:
         st.dataframe(paper_table, width="stretch", hide_index=True)
+
+    st.markdown("#### Frozen Final Closed Trades")
+    saved_trade_table = build_saved_trade_history_table(final_trade_ledger, limit=200)
+    if saved_trade_table.empty:
+        st.info("No frozen final trade rows are available yet.")
+    else:
+        st.dataframe(saved_trade_table, width="stretch", hide_index=True)
 
     st.markdown("#### Recently Blocked Signals")
     blocked = build_blocked_signal_table(predictions, limit=25)
@@ -733,6 +898,22 @@ def render_backtest_walkforward() -> None:
     _backtest_fragment()
 
 
+def render_global_popup() -> None:
+    settings = get_ui_settings()
+    if not bool(settings.get("live_enabled", False)):
+        return
+
+    run_every = get_auto_refresh_run_every(settings)
+
+    @st.fragment(run_every=run_every)
+    def _popup_fragment() -> None:
+        refresh_key = build_refresh_key(settings)
+        ribbon = cached_mt5_timeframe_ribbon(str(settings["mt5_symbol"]), True, refresh_key=refresh_key)
+        render_m30_ribbon_card(ribbon)
+
+    _popup_fragment()
+
+
 inject_styles()
 app_settings = sidebar_state()
 st.session_state["_ui_settings"] = app_settings
@@ -745,3 +926,5 @@ pages = [
 ]
 navigation = st.navigation(pages)
 navigation.run()
+
+render_global_popup()

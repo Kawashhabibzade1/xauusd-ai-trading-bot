@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from typing import Any
 
 import pandas as pd
 
@@ -17,7 +18,7 @@ from create_labels import create_labeled_frame
 from export_mt5_validation_set import export_validation_fixture
 from export_to_onnx_simple import export_model_to_onnx
 from feature_engineering import compute_feature_frame
-from filter_overlap import filter_overlap_frame
+from filter_overlap import filter_hunt_windows_frame, normalize_hunt_windows
 from mt5_client import (
     copy_exported_rates_csv,
     fetch_and_write_rates_csv,
@@ -128,6 +129,8 @@ def run_live_pipeline(
     mt5_features_output: str = DEFAULT_MT5_LIVE_MT5_FEATURES_PATH,
     mt5_config_output: str = DEFAULT_MT5_LIVE_MT5_MODEL_CONFIG_PATH,
     report_output: str = DEFAULT_MT5_LIVE_REPORT_PATH,
+    hunt_timezone: str = "UTC",
+    hunt_windows: list[dict[str, Any]] | None = None,
     skip_onnx_runtime_check: bool = False,
     skip_confidence_analysis: bool = False,
     skip_backtest: bool = False,
@@ -181,7 +184,11 @@ def run_live_pipeline(
     standardized_output_path = ensure_parent_dir(standardized_output)
     standardized.to_csv(standardized_output_path, index=False)
 
-    overlap = filter_overlap_frame(standardized)
+    active_hunt_windows = normalize_hunt_windows(hunt_windows) if hunt_windows else normalize_hunt_windows(
+        [{"name": "Overlap", "start": "13:00", "end": "16:59", "max_trades": 0}]
+    )
+    active_hunt_timezone = str(hunt_timezone or "UTC")
+    overlap = filter_hunt_windows_frame(standardized, timezone_name=active_hunt_timezone, windows=active_hunt_windows)
     overlap_output_path = ensure_parent_dir(overlap_output)
     overlap.to_csv(overlap_output_path, index=False)
 
@@ -269,6 +276,8 @@ def run_live_pipeline(
         "overlap_rows": len(overlap),
         "overlap_start": str(overlap["time"].min()),
         "overlap_end": str(overlap["time"].max()),
+        "hunt_timezone": active_hunt_timezone,
+        "hunt_windows": active_hunt_windows,
         "feature_rows": len(features),
         "feature_time": str(features["time"].iloc[-1]),
         "labeled_rows": len(labeled),
@@ -311,6 +320,7 @@ def run_live_pipeline(
             ),
             "This MT5 path is local-only and requires a running MetaTrader terminal on the same machine.",
             "Training, confidence analysis, and backtest outputs come from the recent MT5 fetch window only, not a full historical regime study.",
+            f"Active hunt timezone: {active_hunt_timezone}.",
         ],
     }
     json_dump(report, report_output)
@@ -375,6 +385,8 @@ def main() -> None:
         mt5_features_output=args.mt5_features_output,
         mt5_config_output=args.mt5_config_output,
         report_output=args.report_output,
+        hunt_timezone="UTC",
+        hunt_windows=None,
         skip_onnx_runtime_check=args.skip_onnx_runtime_check,
         skip_confidence_analysis=args.skip_confidence_analysis,
         skip_backtest=args.skip_backtest,
