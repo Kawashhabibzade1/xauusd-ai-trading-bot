@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
@@ -28,6 +29,7 @@ from mt5_client import (
     resolve_password,
     resolve_server,
     resolve_terminal_path,
+    sync_mt5_file_artifacts,
 )
 from pipeline_contract import (
     DEFAULT_FEATURE_CONFIG,
@@ -57,7 +59,7 @@ from train_lightgbm import train_model_from_labeled
 from validate_merged_data import load_and_standardize, validate_standardized
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default="XAUUSD", help="MT5 symbol, for example XAUUSD.")
     parser.add_argument("--timeframe", default="M1", help="MT5 timeframe, for example M1.")
@@ -98,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-onnx-runtime-check", action="store_true", help="Skip optional onnxruntime verification.")
     parser.add_argument("--skip-confidence-analysis", action="store_true", help="Skip confidence threshold analysis.")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip approximate backtest generation.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def run_live_pipeline(
@@ -253,6 +255,19 @@ def run_live_pipeline(
         mt5_config_output=mt5_config_output,
         skip_runtime_check=skip_onnx_runtime_check,
     )
+    synced_mt5_files = []
+    sync_error = None
+    try:
+        synced_mt5_files = sync_mt5_file_artifacts(
+            [
+                validation_output,
+                onnx_output,
+                mt5_features_output,
+                mt5_config_output,
+            ]
+        )
+    except Exception as exc:
+        sync_error = str(exc)
 
     validation_df = pd.read_csv(fixture_result["output_path"])
     latest_prediction = validation_df.iloc[-1].to_dict()
@@ -310,6 +325,7 @@ def run_live_pipeline(
             "validation_output": display_path(validation_output),
             "onnx_output": display_path(onnx_output),
             "report_output": display_path(report_output),
+            "mt5_file_sync": [item["target"] for item in synced_mt5_files],
         },
         "notes": [
             fetch_result["volume_note"],
@@ -321,43 +337,21 @@ def run_live_pipeline(
             "This MT5 path is local-only and requires a running MetaTrader terminal on the same machine.",
             "Training, confidence analysis, and backtest outputs come from the recent MT5 fetch window only, not a full historical regime study.",
             f"Active hunt timezone: {active_hunt_timezone}.",
+            (
+                f"Synced {len(synced_mt5_files)} MT5 artifact files into the local MQL5/Files directory."
+                if synced_mt5_files
+                else f"MT5 artifact sync skipped: {sync_error}"
+                if sync_error
+                else "MT5 artifact sync was not needed."
+            ),
         ],
     }
     json_dump(report, report_output)
     return report
 
 
-def print_summary(report: dict) -> None:
-    print("MT5 live pipeline artifacts generated:")
-    print(f"  source provider  : {report['source_provider']}")
-    print(f"  symbol           : {report['symbol']}")
-    print(f"  source rows      : {report['source_rows']}")
-    print(f"  source range     : {report['source_start']} -> {report['source_end']}")
-    print(f"  overlap rows     : {report['overlap_rows']}")
-    print(f"  feature rows     : {report['feature_rows']}")
-    print(f"  labeled rows     : {report['labeled_rows']}")
-    print(f"  validation rows  : {report['validation_rows']}")
-    print(f"  latest prediction: {report['prediction']['label']} @ {report['prediction']['time']}")
-    print(f"  runtime status   : {report['runtime_status']}")
-    print()
-    print("Key outputs:")
-    for key, value in report["artifacts"].items():
-        print(f"  {key}: {value}")
-
-
-def main() -> None:
-    args = parse_args()
-    print("=" * 70)
-    print("XAUUSD MT5 LIVE PIPELINE")
-    print("=" * 70)
-    print(f"Symbol     : {normalize_mt5_symbol(args.symbol)}")
-    print(f"Timeframe  : {args.timeframe}")
-    print(f"Count      : {args.count}")
-    print(f"Source     : {args.source_mode}")
-    print(f"Real volume: {args.prefer_real_volume}")
-    print()
-
-    report = run_live_pipeline(
+def run_from_args(args: argparse.Namespace) -> dict:
+    return run_live_pipeline(
         symbol=args.symbol,
         timeframe=args.timeframe,
         count=args.count,
@@ -391,6 +385,39 @@ def main() -> None:
         skip_confidence_analysis=args.skip_confidence_analysis,
         skip_backtest=args.skip_backtest,
     )
+
+
+def print_summary(report: dict) -> None:
+    print("MT5 live pipeline artifacts generated:")
+    print(f"  source provider  : {report['source_provider']}")
+    print(f"  symbol           : {report['symbol']}")
+    print(f"  source rows      : {report['source_rows']}")
+    print(f"  source range     : {report['source_start']} -> {report['source_end']}")
+    print(f"  overlap rows     : {report['overlap_rows']}")
+    print(f"  feature rows     : {report['feature_rows']}")
+    print(f"  labeled rows     : {report['labeled_rows']}")
+    print(f"  validation rows  : {report['validation_rows']}")
+    print(f"  latest prediction: {report['prediction']['label']} @ {report['prediction']['time']}")
+    print(f"  runtime status   : {report['runtime_status']}")
+    print()
+    print("Key outputs:")
+    for key, value in report["artifacts"].items():
+        print(f"  {key}: {value}")
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    print("=" * 70)
+    print("XAUUSD MT5 LIVE PIPELINE")
+    print("=" * 70)
+    print(f"Symbol     : {normalize_mt5_symbol(args.symbol)}")
+    print(f"Timeframe  : {args.timeframe}")
+    print(f"Count      : {args.count}")
+    print(f"Source     : {args.source_mode}")
+    print(f"Real volume: {args.prefer_real_volume}")
+    print()
+
+    report = run_from_args(args)
     print_summary(report)
 
 

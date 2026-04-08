@@ -21,8 +21,9 @@ from pipeline_contract import (
 UTC = ZoneInfo("UTC")
 DEFAULT_HUNT_TIMEZONE = "Europe/Berlin"
 DEFAULT_HUNT_WINDOWS = [
-    {"name": "Morning Hunt", "start": "07:45", "end": "13:00", "max_trades": 2},
-    {"name": "Afternoon Hunt", "start": "15:00", "end": "17:00", "max_trades": 2},
+    {"name": "Night Hunt", "start": "23:00", "end": "07:00", "max_trades": 5},
+    {"name": "Morning Hunt", "start": "07:45", "end": "13:00", "max_trades": 5},
+    {"name": "Afternoon Hunt", "start": "15:00", "end": "17:00", "max_trades": 5},
 ]
 
 
@@ -84,10 +85,19 @@ def annotate_hunt_windows(
     normalized_windows = normalize_hunt_windows(windows)
     weekday_mask = annotated["local_dayofweek"].lt(5)
     for window in normalized_windows:
-        window_mask = (
-            weekday_mask
-            & annotated["local_minutes"].between(window["start_minute"], window["end_minute"], inclusive="both")
-        )
+        if window["start_minute"] <= window["end_minute"]:
+            time_mask = annotated["local_minutes"].between(window["start_minute"], window["end_minute"], inclusive="both")
+            window_mask = weekday_mask & time_mask
+        else:
+            # Overnight windows such as 23:00 -> 07:00 wrap across midnight.
+            late_mask = annotated["local_minutes"].ge(window["start_minute"])
+            early_mask = annotated["local_minutes"].le(window["end_minute"])
+            start_weekday_mask = annotated["local_dayofweek"].isin([6, 0, 1, 2, 3])
+            end_weekday_mask = annotated["local_dayofweek"].isin([0, 1, 2, 3, 4])
+            window_mask = (
+                (late_mask & start_weekday_mask)
+                | (early_mask & end_weekday_mask)
+            )
         annotated.loc[window_mask, "hunt_window_name"] = window["name"]
         annotated.loc[window_mask, "hunt_window_allowed"] = True
         annotated.loc[window_mask, "hunt_window_trade_limit"] = window["max_trades"]

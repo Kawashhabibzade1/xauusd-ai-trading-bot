@@ -97,6 +97,12 @@ def _device_name(torch: Any) -> str:
     return "cpu"
 
 
+def _count_model_parameters(model: Any) -> tuple[int, int]:
+    total = sum(parameter.numel() for parameter in model.parameters())
+    trainable = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
+    return int(total), int(trainable)
+
+
 def _build_model(input_features: int, config: dict[str, Any]) -> Any:
     torch, nn, _, _ = _lazy_import_torch()
     neural_cfg = config["neural"]
@@ -165,6 +171,7 @@ def _fit_one_fold(
     X_valid_norm = ((X_valid - mean) / std).astype(np.float32)
 
     model = _build_model(X_train.shape[2], config).to(device)
+    total_parameters, trainable_parameters = _count_model_parameters(model)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(neural_cfg["learning_rate"]),
@@ -216,6 +223,8 @@ def _fit_one_fold(
         "normalization_std": std.astype(np.float32),
         "feature_count": X_train.shape[2],
         "config": config["neural"],
+        "parameter_count": total_parameters,
+        "trainable_parameter_count": trainable_parameters,
     }
     return state, probabilities, {"training_loss": loss_history[-1] if loss_history else None, "device": str(device)}
 
@@ -274,6 +283,8 @@ def train_patchtst_research_model(
         "model_family": "PatchTST-inspired multi-horizon classifier",
         "lookback": lookback,
         "prediction_coverage": float(valid_mask.mean()),
+        "parameter_count": int(last_state.get("parameter_count", 0)),
+        "trainable_parameter_count": int(last_state.get("trainable_parameter_count", 0)),
         "notes": training_notes,
         "horizons": {},
     }

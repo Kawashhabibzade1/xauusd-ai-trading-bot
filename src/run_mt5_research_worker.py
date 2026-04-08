@@ -129,30 +129,34 @@ def load_latest_trade_ready_signal(predictions_output: str) -> dict[str, Any] | 
     if not path.exists():
         return None
 
-    latest: dict[str, Any] | None = None
-    latest_time: datetime | None = None
+    latest_row: dict[str, str] | None = None
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            signal = str(row.get("recommended_trade", "")).strip().upper()
-            gate_status = str(row.get("gate_status", "")).strip().upper()
-            signal_time_text = str(row.get("time", "")).strip()
-            signal_time = parse_signal_time(signal_time_text)
-            if signal not in {"LONG", "SHORT"} or gate_status != "READY" or signal_time is None:
-                continue
-            if latest_time is None or signal_time > latest_time:
-                latest_time = signal_time
-                latest = {
-                    "signal": signal,
-                    "gate_status": gate_status,
-                    "signal_time": signal_time_text,
-                    "symbol": str(row.get("symbol", "")).strip(),
-                    "session_name": str(row.get("session_name", "")).strip(),
-                    "entry_price": float(row.get("entry_price", 0.0) or 0.0),
-                    "setup_score": float(row.get("setup_score", 0.0) or 0.0),
-                    "expected_value": float(row.get("expected_value", 0.0) or 0.0),
-                }
-    return latest
+            latest_row = row
+
+    if latest_row is None:
+        return None
+
+    signal = str(latest_row.get("recommended_trade", "")).strip().upper()
+    gate_status = str(latest_row.get("gate_status", "")).strip().upper()
+    paper_status = str(latest_row.get("paper_status", "")).strip().upper()
+    signal_time_text = str(latest_row.get("time", "")).strip()
+    signal_time = parse_signal_time(signal_time_text)
+    if signal not in {"LONG", "SHORT"} or gate_status != "READY" or paper_status != "SIGNAL_READY" or signal_time is None:
+        return None
+
+    return {
+        "signal": signal,
+        "gate_status": gate_status,
+        "paper_status": paper_status,
+        "signal_time": signal_time_text,
+        "symbol": str(latest_row.get("symbol", "")).strip(),
+        "session_name": str(latest_row.get("session_name", "")).strip(),
+        "entry_price": float(latest_row.get("entry_price", 0.0) or 0.0),
+        "setup_score": float(latest_row.get("setup_score", 0.0) or 0.0),
+        "expected_value": float(latest_row.get("expected_value", 0.0) or 0.0),
+    }
 
 
 def escape_applescript(value: str) -> str:

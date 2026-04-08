@@ -7,7 +7,7 @@ Validation-first XAUUSD pipeline for LightGBM training and MT5 ONNX inference.
 - Fast local demo mode is available via `python src/run_sample_demo.py`
 - Model contract is fixed to 68 ordered features
 - MT5 integration is validation-first: feature computation, ONNX inference, fixture comparison, and signal logging
-- Auto-trading, risk management, and Strategy Tester proof are still pending
+- Experimental MT5 demo-account auto-trading is available in the EA; broader live-risk validation and Strategy Tester proof are still pending
 
 ## Fast Local Demo
 
@@ -63,9 +63,6 @@ TWELVEDATA_API_KEY=your_key_here
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TELEGRAM_CHAT_ID=your_telegram_chat_id_here
 MT5_TERMINAL_PATH=/path/to/terminal64.exe
-MT5_LOGIN=12345678
-MT5_PASSWORD=your_password
-MT5_SERVER=your_broker_server
 ```
 
 You do not need to put MT5 credentials into the project if your MetaTrader terminal is already open and logged in locally. In that case, the MT5 live path can often attach to the running terminal directly.
@@ -89,13 +86,20 @@ If your MT5 terminal is already open and logged in, no credentials are required 
 
 If the direct `MetaTrader5` Python bridge is not available on your machine, the runner automatically falls back to the MT5 exporter CSV written by the bundled exporter EA.
 
-Optional environment variables:
+Optional environment variable:
 ```bash
 MT5_TERMINAL_PATH=/path/to/terminal
-MT5_LOGIN=12345678
-MT5_PASSWORD=your_password
-MT5_SERVER=your_broker_server
 ```
+
+Preferred macOS flow:
+```bash
+python src/install_mt5_exporter.py
+python src/mt5_keychain_cli.py store --login 12345678 --server MetaQuotes-Demo
+python src/mt5_keychain_cli.py status
+python src/mt5_keychain_cli.py run-live-pipeline -- --source-mode export
+```
+
+The `store` command prompts for the MT5 password securely and saves the login, password, and server in macOS Keychain. The secure pipeline wrappers load those values only for the current Python process, so you do not need to put MT5 secrets into `.env`, `.env.local`, or shell history.
 
 MT5 live outputs are written separately:
 - `data/live/xauusd_mt5_raw.csv`
@@ -108,12 +112,87 @@ MT5 live outputs are written separately:
 - `mt5_expert_advisor/Files/models/xauusd_ai_mt5_live.onnx`
 - `data/live/live_mt5_pipeline_report.json`
 
+When the local MT5 `MQL5/Files` folder is available, this runner now also syncs the generated MT5 bot artifacts there automatically so the EA can load the newest live model without manual file copying.
+
 Important caveat:
 - this path is local-only and depends on a MetaTrader terminal on the same machine
 - the Python `MetaTrader5` package is environment/platform dependent, so this path is intended for your local trading machine, not Streamlit Community Cloud
 - on macOS, the `MT5_Live_Data_Exporter.mq5` fallback is often the more reliable path
 - the exporter writes `xauusd_mt5_live.csv` into your local MT5 `MQL5/Files` folder, and the Python runner reads that file automatically
 - by default the pipeline uses `tick_volume` as the live `volume` field; `real_volume` can be preferred only when your broker/feed actually provides it
+
+## MT5 Demo Auto-Trading
+
+Use this path if you want the MT5 Expert Advisor to place demo-account orders automatically from the ONNX model.
+
+Safety defaults:
+- demo-account trading only; broker execution is hard-locked to demo accounts in the EA
+- validation mode stays on by default
+- one managed position at a time per symbol/magic number
+- ATR-based stop loss and fixed risk-reward take profit
+- spread and confidence guards before order submission
+
+### 1. Generate and sync the live MT5 model artifacts
+```bash
+python src/install_mt5_exporter.py
+python src/mt5_keychain_cli.py store --login 12345678 --server MetaQuotes-Demo
+python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode export
+```
+
+One-command prep if your Keychain entry already exists:
+```bash
+./scripts/prepare_mt5_demo_rollout.sh --source-mode export
+```
+
+Optional manual resync if you want to push the repo artifacts into MT5 again:
+```bash
+python src/sync_mt5_bot_artifacts.py --variant live_mt5_research
+```
+
+### 2. Install and compile the trading EA
+```bash
+python src/install_mt5_bot.py
+```
+
+### 3. Attach the EA in MetaTrader 5
+Attach `XAUUSD_AI_Bot` to a live `XAUUSD` or `XAUUSD-*` `M1` chart on your demo account.
+
+Important chart setup:
+- keep `MT5_Live_Data_Exporter` on its own separate `XAUUSD` `M1` chart if you want the local Streamlit live price, timeframe ribbon, or MT5 paper-research worker to stay fresh
+- attach `XAUUSD_AI_Bot` to a different `XAUUSD` `M1` chart
+- MT5 allows only one Expert Advisor per chart, so attaching `XAUUSD_AI_Bot` onto the same chart will remove the exporter and freeze `xauusd_mt5_live.csv`
+
+Use these EA inputs:
+- `InpValidationMode=false`
+- `InpEnableDemoTrading=true`
+- `InpDemoOnly=true`
+- `InpRequireTradeDirective=true`
+- `InpMaxDirectiveEntryDriftPoints=30`
+- `InpSessionTradeLimit=1`
+- `InpModelName=models\\xauusd_ai_mt5_live.onnx`
+
+Recommended starting defaults:
+- `InpFixedLotSize=0.01`
+- `InpConfidenceThresh=0.55`
+- `InpStopAtrMultiple=1.00`
+- `InpTakeProfitRR=1.50`
+
+Important:
+- keep this on a demo account first
+- enable `Algo Trading` in MT5
+- the EA writes signal logs to `logs\\xauusd_ai_signals.csv` and trade logs to `logs\\xauusd_ai_trades.csv`
+- the EA follows the paper/research trade directive, so MT5 demo trades use the same gated setup source as the paper path
+- the EA blocks entries when the live market price drifts too far from the paper directive entry, so demo execution stays close to the mirrored paper setup
+- the EA caps demo order size at `0.01` lots and, with `InpSessionTradeLimit=1`, will place only one successful demo trade for this proof run
+- Streamlit and learning stay on the paper/research artifacts only; MT5 broker-side trade logs are not ingested there
+- this path is still experimental and should be validated in MT5 Strategy Tester before any non-demo use
+
+Verification checklist before first accepted order:
+- EA initializes successfully on the `XAUUSD` `M1` chart
+- non-demo accounts are rejected when `InpDemoOnly=true`
+- `logs\\xauusd_ai_signals.csv` updates on eligible overlap bars
+- `logs\\xauusd_ai_trades.csv` records `SKIP` or `BLOCK` reasons before any accepted order
+- wide spreads, low confidence, and opposite-position flips are blocked according to the configured guards
 
 ## Local MT5 Paper Trading Stack
 
@@ -125,6 +204,7 @@ Use this path if you want the whole project to work locally on your PC with:
 Prerequisites:
 - desktop MetaTrader 5 is open on the same machine
 - `MT5_Live_Data_Exporter` is attached to a live `XAUUSD` or `XAUUSD-*` `M1` chart
+- if `XAUUSD_AI_Bot` is also running, keep it on a separate `XAUUSD` `M1` chart so the exporter is not removed
 - `Algo Trading` is enabled
 
 Start everything:

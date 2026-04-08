@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -17,7 +18,7 @@ import pandas as pd
 import yaml
 
 from filter_overlap import annotate_hunt_windows
-from mt5_client import normalize_mt5_symbol
+from mt5_client import normalize_mt5_symbol, sync_mt5_file_artifacts
 from pipeline_contract import (
     DEFAULT_MT5_LIVE_FEATURE_OUTPUT,
     DEFAULT_MT5_LIVE_MT5_VALIDATION_OUTPUT,
@@ -34,6 +35,7 @@ from pipeline_contract import (
     DEFAULT_MT5_RESEARCH_REPORT_OUTPUT,
     DEFAULT_MT5_RESEARCH_SNAPSHOT_DIR,
     DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT,
+    DEFAULT_MT5_TRADE_DIRECTIVE_OUTPUT,
     display_path,
     ensure_parent_dir,
     json_dump,
@@ -48,7 +50,7 @@ SETUP_NAME_MAP = {-1: "SHORT_SETUP", 0: "NO_TRADE", 1: "LONG_SETUP"}
 OVERRIDEABLE_RISK_BLOCKERS = {"DAILY_TRADE_LIMIT", "DAILY_LOSS_LIMIT"}
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", default="XAUUSD", help="MT5 symbol label for reporting.")
     parser.add_argument("--timeframe", default="M1", help="MT5 timeframe label for reporting.")
@@ -71,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-output", default=DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT, help="MT5 live paper ledger CSV output.")
     parser.add_argument("--trade-history-output", default=DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT, help="Append-only MT5 paper trade history CSV output.")
     parser.add_argument("--final-ledger-output", default=DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT, help="Frozen final MT5 paper ledger CSV output.")
+    parser.add_argument("--trade-directive-output", default=DEFAULT_MT5_TRADE_DIRECTIVE_OUTPUT, help="MT5 demo trade directive CSV output.")
     parser.add_argument("--snapshot-dir", default=DEFAULT_MT5_RESEARCH_SNAPSHOT_DIR, help="Immutable MT5 research snapshot directory.")
     parser.add_argument("--feedback-output", default=DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT, help="Learning feedback CSV output.")
     parser.add_argument("--learning-status-output", default=DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT, help="Learning readiness JSON output.")
@@ -79,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-onnx-runtime-check", action="store_true", help="Skip optional onnxruntime verification.")
     parser.add_argument("--skip-confidence-analysis", action="store_true", help="Skip optional confidence analysis in the fast live path.")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip the approximate backtest in the fast live path.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_config(path_like: str) -> dict[str, Any]:
@@ -414,6 +417,15 @@ def calculate_max_drawdown(equity_curve: list[dict[str, Any]]) -> float:
     return max_dd
 
 
+def estimate_position_volume_lots(risk_cash: float, stop_distance: float, contract_size: float) -> float:
+    risk_cash = float(risk_cash)
+    stop_distance = abs(float(stop_distance))
+    contract_size = float(contract_size)
+    if risk_cash <= 0.0 or stop_distance <= 1e-8 or contract_size <= 0.0:
+        return float("nan")
+    return float(risk_cash / (stop_distance * contract_size))
+
+
 def simulate_paper_trades(
     predictions: pd.DataFrame,
     raw_frame: pd.DataFrame,
@@ -421,6 +433,7 @@ def simulate_paper_trades(
     manual_override: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
     paper_cfg = config["trading"]["paper"]
+    hunt_timezone = str(config.get("trading", {}).get("hunt_timezone", "UTC"))
     labels_cfg = config["labels"]
     override_state = dict(manual_override or {})
 
@@ -430,6 +443,7 @@ def simulate_paper_trades(
 
     equity = float(paper_cfg["starting_equity"])
     risk_per_trade = float(paper_cfg["risk_per_trade"])
+    contract_size = float(paper_cfg.get("contract_size", 100.0) or 100.0)
     max_holding_bars = int(paper_cfg["max_holding_bars"])
     max_trades_per_day = int(paper_cfg["max_trades_per_day"])
     daily_loss_stop = int(paper_cfg["daily_loss_streak_stop"])
@@ -445,7 +459,11 @@ def simulate_paper_trades(
 
     for index, row in working.iterrows():
         signal_time = pd.Timestamp(row["time"])
-        signal_day = str(signal_time.date())
+        if signal_time.tzinfo is None:
+            local_signal_time = signal_time.tz_localize("UTC").tz_convert(hunt_timezone)
+        else:
+            local_signal_time = signal_time.tz_convert(hunt_timezone)
+        signal_day = str(local_signal_time.date())
         trade_window_name = str(row.get("trade_window_name", "") or row.get("session_name", "") or "UNSPECIFIED")
         trade_window_limit = int(row.get("trade_window_max_trades", 0) or 0)
         trade_window_key = f"{signal_day}|{trade_window_name}"
@@ -461,6 +479,8 @@ def simulate_paper_trades(
             working.at[index, "paper_status"] = "BLOCKED_BY_RISK"
             working.at[index, "paper_reason_blocked"] = join_reasons(str(working.at[index, "paper_reason_blocked"]), "INVALID_STOP_DISTANCE")
             continue
+        risk_cash = equity * risk_per_trade
+        volume_lots = estimate_position_volume_lots(risk_cash, stop_distance, contract_size)
 
         risk_blockers: list[str] = []
         if next_available_time is not None and signal_time <= next_available_time:
@@ -497,6 +517,10 @@ def simulate_paper_trades(
                 "tp2": tp2,
                 "setup_score": float(row["setup_score"]),
                 "expected_value": float(row["expected_value"]),
+                "risk_cash": float(risk_cash),
+                "volume_lots": volume_lots,
+                "position_sizing_mode": "equity_risk",
+                "assumed_contract_size": float(contract_size),
                 "manual_override_used": bool(working.at[index, "manual_override_used"]),
                 "manual_override_reason": str(working.at[index, "manual_override_reason"]),
             }
@@ -578,6 +602,10 @@ def simulate_paper_trades(
                 "tp2": tp2,
                 "setup_score": float(row["setup_score"]),
                 "expected_value": float(row["expected_value"]),
+                "risk_cash": float(risk_cash),
+                "volume_lots": volume_lots,
+                "position_sizing_mode": "equity_risk",
+                "assumed_contract_size": float(contract_size),
                 "manual_override_used": bool(working.at[index, "manual_override_used"]),
                 "manual_override_reason": str(working.at[index, "manual_override_reason"]),
             }
@@ -586,7 +614,6 @@ def simulate_paper_trades(
 
         working.at[index, "paper_status"] = "OPENED"
         working.at[index, "paper_trade_id"] = f"T{trade_id:04d}"
-        risk_cash = equity * risk_per_trade
         pnl_cash = risk_cash * realized_r
         equity_after = equity + pnl_cash
         daily_trade_count[signal_day] += 1
@@ -618,6 +645,10 @@ def simulate_paper_trades(
                 "setup_score": float(row["setup_score"]),
                 "expected_value": float(row["expected_value"]),
                 "entry_quality": float(row["entry_quality"]),
+                "risk_cash": float(risk_cash),
+                "volume_lots": volume_lots,
+                "position_sizing_mode": "equity_risk",
+                "assumed_contract_size": float(contract_size),
                 "realized_r": float(realized_r),
                 "pnl_cash": float(pnl_cash),
                 "equity_before": float(equity),
@@ -645,6 +676,9 @@ def simulate_paper_trades(
             "profit_factor": 0.0,
             "expectancy_r": 0.0,
             "max_drawdown": 0.0,
+            "risk_per_trade": risk_per_trade,
+            "position_sizing_mode": "equity_risk",
+            "assumed_contract_size": float(contract_size),
             "equity_curve": [],
             "open_trade": open_trade_summary,
         }
@@ -671,6 +705,9 @@ def simulate_paper_trades(
         "profit_factor": profit_factor,
         "expectancy_r": float(ledger["realized_r"].mean()),
         "max_drawdown": calculate_max_drawdown(equity_curve),
+        "risk_per_trade": risk_per_trade,
+        "position_sizing_mode": "equity_risk",
+        "assumed_contract_size": float(contract_size),
         "equity_curve": equity_curve,
         "open_trade": open_trade_summary,
     }
@@ -871,6 +908,60 @@ def build_learning_status(feedback: pd.DataFrame, config: dict[str, Any]) -> dic
     }
 
 
+def build_trade_directive_frame(predictions: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "epoch_utc",
+        "time_utc",
+        "recommended_trade",
+        "gate_status",
+        "paper_status",
+        "paper_reason_blocked",
+        "directional_confidence",
+        "setup_score",
+        "expected_value",
+        "entry_price",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "session_name",
+        "manual_override_used",
+        "execution_scope",
+        "learning_source",
+        "streamlit_scope",
+    ]
+    if predictions.empty:
+        return pd.DataFrame(columns=columns)
+
+    latest = predictions.iloc[-1]
+    signal_time = pd.to_datetime(latest.get("time"), errors="coerce", utc=True)
+    epoch_utc = int(signal_time.timestamp()) if pd.notna(signal_time) else 0
+    return pd.DataFrame(
+        [
+            {
+                "epoch_utc": epoch_utc,
+                "time_utc": str(latest.get("time", "")),
+                "recommended_trade": str(latest.get("recommended_trade", "")),
+                "gate_status": str(latest.get("gate_status", "")),
+                "paper_status": str(latest.get("paper_status", "")),
+                "paper_reason_blocked": str(latest.get("paper_reason_blocked", "")),
+                "directional_confidence": float(latest.get("directional_confidence", 0.0)),
+                "setup_score": float(latest.get("setup_score", 0.0)),
+                "expected_value": float(latest.get("expected_value", 0.0)),
+                "entry_price": float(latest.get("entry_price", 0.0)),
+                "stop_loss": float(latest.get("stop_loss", 0.0)),
+                "tp1": float(latest.get("tp1", 0.0)),
+                "tp2": float(latest.get("tp2", 0.0)),
+                "session_name": str(latest.get("session_name", "")),
+                "manual_override_used": bool(latest.get("manual_override_used", False)),
+                "execution_scope": "demo_only",
+                "learning_source": "paper_only",
+                "streamlit_scope": "paper_research_only",
+            }
+        ],
+        columns=columns,
+    )
+
+
 def build_history_trade_key(row: pd.Series) -> str:
     signal_time = str(row.get("signal_time", "")).strip()
     direction = str(row.get("direction", "")).strip().upper()
@@ -893,6 +984,15 @@ def build_trade_summary_from_ledger(
     open_trade_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     starting_equity = float(starting_equity)
+    summary_risk_per_trade = 0.0
+    summary_position_sizing_mode = ""
+    summary_contract_size = 0.0
+    if open_trade_summary:
+        summary_position_sizing_mode = str(open_trade_summary.get("position_sizing_mode", "") or "")
+        summary_contract_size = float(open_trade_summary.get("assumed_contract_size", 0.0) or 0.0)
+        open_trade_risk_cash = float(open_trade_summary.get("risk_cash", 0.0) or 0.0)
+        if starting_equity > 0.0 and open_trade_risk_cash > 0.0:
+            summary_risk_per_trade = float(open_trade_risk_cash / starting_equity)
     if ledger.empty:
         return {
             "starting_equity": starting_equity,
@@ -907,6 +1007,9 @@ def build_trade_summary_from_ledger(
             "profit_factor": 0.0,
             "expectancy_r": 0.0,
             "max_drawdown": 0.0,
+            "risk_per_trade": summary_risk_per_trade,
+            "position_sizing_mode": summary_position_sizing_mode,
+            "assumed_contract_size": summary_contract_size,
             "equity_curve": [],
             "open_trade": open_trade_summary,
         }
@@ -918,6 +1021,20 @@ def build_trade_summary_from_ledger(
     win_count = int((ledger["realized_r"] > 0).sum())
     loss_count = int((ledger["realized_r"] < 0).sum())
     flat_count = int((ledger["realized_r"] == 0).sum())
+    if "risk_cash" in ledger.columns and "equity_before" in ledger.columns:
+        equity_before = pd.to_numeric(ledger["equity_before"], errors="coerce")
+        risk_cash = pd.to_numeric(ledger["risk_cash"], errors="coerce")
+        valid = equity_before.gt(0) & risk_cash.notna()
+        if valid.any():
+            summary_risk_per_trade = float((risk_cash[valid] / equity_before[valid]).iloc[-1])
+    if "position_sizing_mode" in ledger.columns:
+        sizing_series = ledger["position_sizing_mode"].dropna().astype(str)
+        if not sizing_series.empty:
+            summary_position_sizing_mode = str(sizing_series.iloc[-1])
+    if "assumed_contract_size" in ledger.columns:
+        contract_series = pd.to_numeric(ledger["assumed_contract_size"], errors="coerce").dropna()
+        if not contract_series.empty:
+            summary_contract_size = float(contract_series.iloc[-1])
     equity_curve = [
         {
             "time": str(row.exit_time) if pd.notna(row.exit_time) else str(row.signal_time),
@@ -938,6 +1055,9 @@ def build_trade_summary_from_ledger(
         "profit_factor": profit_factor,
         "expectancy_r": float(ledger["realized_r"].mean()),
         "max_drawdown": calculate_max_drawdown(equity_curve),
+        "risk_per_trade": summary_risk_per_trade,
+        "position_sizing_mode": summary_position_sizing_mode,
+        "assumed_contract_size": summary_contract_size,
         "equity_curve": equity_curve,
         "open_trade": open_trade_summary,
     }
@@ -948,6 +1068,9 @@ def materialize_final_trade_ledger(
     final_ledger_output: str,
     starting_equity: float,
     open_trade_summary: dict[str, Any] | None = None,
+    risk_per_trade: float = 0.0,
+    position_sizing_mode: str = "equity_risk",
+    assumed_contract_size: float = 100.0,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     base_columns = [
         "final_trade_key",
@@ -976,6 +1099,10 @@ def materialize_final_trade_ledger(
         "setup_score",
         "expected_value",
         "entry_quality",
+        "risk_cash",
+        "volume_lots",
+        "position_sizing_mode",
+        "assumed_contract_size",
         "realized_r",
         "pnl_cash",
         "equity_before",
@@ -1012,17 +1139,35 @@ def materialize_final_trade_ledger(
         final_ledger = final_ledger.sort_values(by=final_sort_columns, ascending=True).copy()
 
     equity = float(starting_equity)
-    if "pnl_cash" not in final_ledger.columns:
-        final_ledger["pnl_cash"] = 0.0
+    risk_per_trade = float(risk_per_trade or 0.0)
     if "realized_r" not in final_ledger.columns:
         final_ledger["realized_r"] = 0.0
+
+    final_ledger["position_sizing_mode"] = position_sizing_mode or "equity_risk"
+    final_ledger["assumed_contract_size"] = float(assumed_contract_size or 100.0)
+
     for index, row in final_ledger.iterrows():
-        pnl_cash_raw = pd.to_numeric(row.get("pnl_cash", 0.0), errors="coerce")
-        pnl_cash = 0.0 if pd.isna(pnl_cash_raw) else float(pnl_cash_raw)
+        realized_r_raw = pd.to_numeric(row.get("realized_r", 0.0), errors="coerce")
+        realized_r = 0.0 if pd.isna(realized_r_raw) else float(realized_r_raw)
+        entry_price_raw = pd.to_numeric(row.get("entry_price", np.nan), errors="coerce")
+        stop_loss_raw = pd.to_numeric(row.get("stop_loss", np.nan), errors="coerce")
+        stop_distance = abs(float(entry_price_raw) - float(stop_loss_raw)) if pd.notna(entry_price_raw) and pd.notna(stop_loss_raw) else np.nan
+
         equity_before = equity
+        if position_sizing_mode == "equity_risk" and risk_per_trade > 0.0:
+            risk_cash = equity_before * risk_per_trade
+            pnl_cash = risk_cash * realized_r
+        else:
+            pnl_cash_raw = pd.to_numeric(row.get("pnl_cash", 0.0), errors="coerce")
+            pnl_cash = 0.0 if pd.isna(pnl_cash_raw) else float(pnl_cash_raw)
+            risk_cash = abs(pnl_cash / realized_r) if abs(realized_r) > 1e-8 else np.nan
+
         equity_after = equity_before + pnl_cash
+        final_ledger.at[index, "risk_cash"] = float(risk_cash) if pd.notna(risk_cash) else np.nan
+        final_ledger.at[index, "pnl_cash"] = float(pnl_cash)
         final_ledger.at[index, "equity_before"] = float(equity_before)
         final_ledger.at[index, "equity_after"] = float(equity_after)
+        final_ledger.at[index, "volume_lots"] = estimate_position_volume_lots(risk_cash, stop_distance, assumed_contract_size)
         equity = equity_after
 
     ordered_output_columns = [column for column in base_columns if column in final_ledger.columns]
@@ -1165,6 +1310,7 @@ def build_report(
     predictions_output: str,
     overlays_output: str,
     paper_output: str,
+    trade_directive_output: str,
     feedback_output: str,
     learning_status_output: str,
     report_output: str,
@@ -1213,6 +1359,7 @@ def build_report(
             "This cockpit is running on MT5 local live data from the desktop exporter on the same machine.",
             "5m and 60m layers are proxy confirmations derived from MT5 live feature state until the heavier multi-horizon MT5 research model is enabled.",
             "Paper trading is simulated locally from recent MT5 bars. It does not place broker orders.",
+            "Any MT5 broker execution is intentionally demo-only and stays separate from Streamlit metrics and learning feedback.",
             *list(live_report.get("notes", [])),
         ],
         "dataset_summary": {
@@ -1272,12 +1419,24 @@ def build_report(
             "allowed_risk_blockers": [str(value) for value in manual_override.get("allowed_risk_blockers", [])],
             "note": str(manual_override.get("note", "")),
         },
+        "execution_policy": {
+            "broker_execution_mode": "demo_only",
+            "trade_setup_source": "paper_trade_directive",
+            "learning_source": "paper_trading_only",
+            "streamlit_scope": "paper_research_only",
+            "ingests_mt5_broker_trades": False,
+            "requires_trade_directive": True,
+            "trade_directive_synced_targets": [],
+            "trade_directive_sync_error": "",
+        },
         "baseline": {
             "walk_forward_splits": "live_window",
             "horizons": baseline_horizons,
         },
         "neural": {
             "status": "disabled",
+            "parameter_count": 0,
+            "trainable_parameter_count": 0,
             "notes": ["The local MT5 paper-trading path is currently using the fast LightGBM live baseline only."],
         },
         "ensemble": {
@@ -1291,6 +1450,7 @@ def build_report(
             "paper_output": display_path(paper_output),
             "trade_history_output": display_path(trade_history_output),
             "final_trade_ledger_output": display_path(final_ledger_output),
+            "trade_directive_output": display_path(trade_directive_output),
             "feedback_output": display_path(feedback_output),
             "learning_status_output": display_path(learning_status_output),
             "report_output": display_path(report_output),
@@ -1312,6 +1472,7 @@ def write_outputs(
     paper_output: str,
     trade_history_output: str,
     final_ledger_output: str,
+    trade_directive_output: str,
     feedback_output: str,
     learning_status_output: str,
     report_output: str,
@@ -1337,6 +1498,9 @@ def write_outputs(
         final_ledger_output=final_ledger_output,
         starting_equity=float(current_run_summary.get("starting_equity", 0.0)),
         open_trade_summary=current_run_summary.get("open_trade"),
+        risk_per_trade=float(current_run_summary.get("risk_per_trade", 0.0)),
+        position_sizing_mode=str(current_run_summary.get("position_sizing_mode", "") or "equity_risk"),
+        assumed_contract_size=float(current_run_summary.get("assumed_contract_size", 100.0) or 100.0),
     )
     report["paper_trading"] = final_summary
     report["backtest"] = final_summary
@@ -1344,6 +1508,17 @@ def write_outputs(
     report.setdefault("dataset_summary", {})["saved_history_rows"] = int(len(trade_history))
     report["dataset_summary"]["paper_trade_rows"] = int(len(final_trade_ledger))
     report["dataset_summary"]["current_run_paper_trade_rows"] = int(len(paper_ledger))
+    trade_directive = build_trade_directive_frame(predictions)
+    trade_directive.to_csv(ensure_parent_dir(trade_directive_output), index=False)
+    synced_directive_targets: list[str] = []
+    sync_error = ""
+    try:
+        synced_directive_targets = [item["target"] for item in sync_mt5_file_artifacts([trade_directive_output])]
+    except Exception as exc:
+        sync_error = str(exc)
+    report.setdefault("outputs", {})["trade_directive_output"] = display_path(trade_directive_output)
+    report.setdefault("execution_policy", {})["trade_directive_synced_targets"] = synced_directive_targets
+    report.setdefault("execution_policy", {})["trade_directive_sync_error"] = sync_error
     feedback.to_csv(ensure_parent_dir(feedback_output), index=False)
     json_dump(learning_status, learning_status_output)
     json_dump(report, report_output)
@@ -1378,6 +1553,7 @@ def run_mt5_research_pipeline(
     paper_output: str = DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT,
     trade_history_output: str = DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT,
     final_ledger_output: str = DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
+    trade_directive_output: str = DEFAULT_MT5_TRADE_DIRECTIVE_OUTPUT,
     snapshot_dir: str = DEFAULT_MT5_RESEARCH_SNAPSHOT_DIR,
     feedback_output: str = DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT,
     learning_status_output: str = DEFAULT_MT5_RESEARCH_LEARNING_STATUS_OUTPUT,
@@ -1435,6 +1611,7 @@ def run_mt5_research_pipeline(
         predictions_output=predictions_output,
         overlays_output=overlays_output,
         paper_output=paper_output,
+        trade_directive_output=trade_directive_output,
         feedback_output=feedback_output,
         learning_status_output=learning_status_output,
         report_output=report_output,
@@ -1456,6 +1633,7 @@ def run_mt5_research_pipeline(
         paper_output,
         trade_history_output,
         final_ledger_output,
+        trade_directive_output,
         feedback_output,
         learning_status_output,
         report_output,
@@ -1464,6 +1642,36 @@ def run_mt5_research_pipeline(
         snapshot_created_at,
     )
     return report
+
+
+def run_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return run_mt5_research_pipeline(
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        count=args.count,
+        source_mode=args.source_mode,
+        terminal_env=args.terminal_env,
+        login_env=args.login_env,
+        password_env=args.password_env,
+        server_env=args.server_env,
+        export_input=args.export_input,
+        prefer_real_volume=args.prefer_real_volume,
+        config=args.config,
+        predictions_output=args.predictions_output,
+        overlays_output=args.overlays_output,
+        paper_output=args.paper_output,
+        trade_history_output=args.trade_history_output,
+        final_ledger_output=args.final_ledger_output,
+        trade_directive_output=args.trade_directive_output,
+        snapshot_dir=args.snapshot_dir,
+        feedback_output=args.feedback_output,
+        learning_status_output=args.learning_status_output,
+        manual_override_output=args.manual_override_output,
+        report_output=args.report_output,
+        skip_onnx_runtime_check=args.skip_onnx_runtime_check,
+        skip_confidence_analysis=args.skip_confidence_analysis,
+        skip_backtest=args.skip_backtest,
+    )
 
 
 def print_research_summary(report: dict[str, Any]) -> None:
@@ -1487,8 +1695,8 @@ def print_research_summary(report: dict[str, Any]) -> None:
     print(f"Outputs     : {report['outputs']['report_output']}")
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
     print("=" * 70)
     print("XAUUSD MT5 RESEARCH PAPER-TRADING PIPELINE")
     print("=" * 70)
@@ -1498,32 +1706,7 @@ def main() -> None:
     print(f"Source     : {args.source_mode}")
     print()
 
-    report = run_mt5_research_pipeline(
-        symbol=args.symbol,
-        timeframe=args.timeframe,
-        count=args.count,
-        source_mode=args.source_mode,
-        terminal_env=args.terminal_env,
-        login_env=args.login_env,
-        password_env=args.password_env,
-        server_env=args.server_env,
-        export_input=args.export_input,
-        prefer_real_volume=args.prefer_real_volume,
-        config=args.config,
-        predictions_output=args.predictions_output,
-        overlays_output=args.overlays_output,
-        paper_output=args.paper_output,
-        trade_history_output=args.trade_history_output,
-        final_ledger_output=args.final_ledger_output,
-        snapshot_dir=args.snapshot_dir,
-        feedback_output=args.feedback_output,
-        learning_status_output=args.learning_status_output,
-        manual_override_output=args.manual_override_output,
-        report_output=args.report_output,
-        skip_onnx_runtime_check=args.skip_onnx_runtime_check,
-        skip_confidence_analysis=args.skip_confidence_analysis,
-        skip_backtest=args.skip_backtest,
-    )
+    report = run_from_args(args)
     print_research_summary(report)
 
 

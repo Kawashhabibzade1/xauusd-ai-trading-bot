@@ -5,6 +5,7 @@ Helpers for loading research cockpit artifacts and building Streamlit visuals.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,10 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 from pipeline_contract import (
+    DEFAULT_MT5_RESEARCH_OVERLAYS_OUTPUT,
+    DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT,
+    DEFAULT_MT5_RESEARCH_PREDICTIONS_OUTPUT,
+    DEFAULT_MT5_RESEARCH_REPORT_OUTPUT,
     DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
     DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT,
     DEFAULT_RESEARCH_OVERLAYS_OUTPUT,
@@ -32,6 +37,30 @@ from oanda_client import (
 from twelvedata_client import fetch_time_series, resolve_api_key
 
 
+SAFE_RESEARCH_OUTPUT_ROOTS = (
+    resolve_repo_path("data/research"),
+    resolve_repo_path("data/live/research_mt5"),
+)
+
+
+def _is_safe_research_output(path: Path) -> bool:
+    resolved = path.resolve()
+    for root in SAFE_RESEARCH_OUTPUT_ROOTS:
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _resolve_safe_output_path(path_like: str | Path | None, fallback: str | Path) -> Path:
+    candidate = resolve_repo_path(path_like or fallback)
+    if _is_safe_research_output(candidate):
+        return candidate
+    return resolve_repo_path(fallback)
+
+
 def _load_json(path_like: str | Path) -> dict[str, Any]:
     with resolve_repo_path(path_like).open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -39,20 +68,26 @@ def _load_json(path_like: str | Path) -> dict[str, Any]:
 
 def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> dict[str, Any]:
     report = _load_json(report_path)
+    mode = str(report.get("mode", "")).strip().lower()
+    is_mt5_live_paper = mode == "mt5_live_paper"
+    default_predictions_path = DEFAULT_MT5_RESEARCH_PREDICTIONS_OUTPUT if is_mt5_live_paper else DEFAULT_RESEARCH_PREDICTIONS_OUTPUT
+    default_overlays_path = DEFAULT_MT5_RESEARCH_OVERLAYS_OUTPUT if is_mt5_live_paper else DEFAULT_RESEARCH_OVERLAYS_OUTPUT
+    default_paper_path = DEFAULT_MT5_RESEARCH_PAPER_LEDGER_OUTPUT if is_mt5_live_paper else DEFAULT_RESEARCH_PAPER_LEDGER_OUTPUT
+    default_trade_history_path = DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT
+    default_final_trade_ledger_path = DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT
     outputs = report.get("outputs", {})
-    predictions_path = outputs.get("predictions_output", DEFAULT_RESEARCH_PREDICTIONS_OUTPUT)
-    overlays_path = outputs.get("overlays_output", DEFAULT_RESEARCH_OVERLAYS_OUTPUT)
-    paper_path = outputs.get("paper_output", DEFAULT_RESEARCH_PAPER_LEDGER_OUTPUT)
-    trade_history_path = outputs.get("trade_history_output", DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT)
-    final_trade_ledger_path = outputs.get("final_trade_ledger_output", "")
+    predictions_path = _resolve_safe_output_path(outputs.get("predictions_output", default_predictions_path), default_predictions_path)
+    overlays_path = _resolve_safe_output_path(outputs.get("overlays_output", default_overlays_path), default_overlays_path)
+    paper_path = _resolve_safe_output_path(outputs.get("paper_output", default_paper_path), default_paper_path)
+    trade_history_path = _resolve_safe_output_path(outputs.get("trade_history_output", default_trade_history_path), default_trade_history_path)
+    final_trade_ledger_path = _resolve_safe_output_path(outputs.get("final_trade_ledger_output", default_final_trade_ledger_path), default_final_trade_ledger_path)
 
-    predictions = pd.read_csv(resolve_repo_path(predictions_path))
+    predictions = pd.read_csv(predictions_path)
     if "time" in predictions.columns:
         predictions["time"] = pd.to_datetime(predictions["time"])
-    paper_ledger_path = resolve_repo_path(paper_path)
-    if paper_ledger_path.exists() and paper_ledger_path.stat().st_size > 0:
+    if paper_path.exists() and paper_path.stat().st_size > 0:
         try:
-            paper_ledger = pd.read_csv(paper_ledger_path)
+            paper_ledger = pd.read_csv(paper_path)
         except EmptyDataError:
             paper_ledger = pd.DataFrame()
         for column in ("signal_time", "entry_time", "exit_time"):
@@ -61,10 +96,9 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     else:
         paper_ledger = pd.DataFrame()
 
-    trade_history_resolved = resolve_repo_path(trade_history_path)
-    if trade_history_resolved.exists() and trade_history_resolved.stat().st_size > 0:
+    if trade_history_path.exists() and trade_history_path.stat().st_size > 0:
         try:
-            trade_history = pd.read_csv(trade_history_resolved)
+            trade_history = pd.read_csv(trade_history_path)
         except EmptyDataError:
             trade_history = pd.DataFrame()
         for column in ("signal_time", "entry_time", "exit_time", "snapshot_created_at"):
@@ -73,10 +107,9 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     else:
         trade_history = pd.DataFrame()
 
-    final_trade_ledger_resolved = resolve_repo_path(final_trade_ledger_path or DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT)
-    if final_trade_ledger_resolved.exists() and final_trade_ledger_resolved.stat().st_size > 0:
+    if final_trade_ledger_path.exists() and final_trade_ledger_path.stat().st_size > 0:
         try:
-            final_trade_ledger = pd.read_csv(final_trade_ledger_resolved)
+            final_trade_ledger = pd.read_csv(final_trade_ledger_path)
         except EmptyDataError:
             final_trade_ledger = pd.DataFrame()
         for column in ("signal_time", "entry_time", "exit_time", "snapshot_created_at", "source_end"):
@@ -97,11 +130,11 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
         "latest_signal": latest_signal,
         "paths": {
             "report": display_path(report_path),
-            "predictions": predictions_path,
-            "overlays": overlays_path,
-            "paper": paper_path,
-            "trade_history": trade_history_path,
-            "final_trade_ledger": final_trade_ledger_path or DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
+            "predictions": display_path(predictions_path),
+            "overlays": display_path(overlays_path),
+            "paper": display_path(paper_path),
+            "trade_history": display_path(trade_history_path),
+            "final_trade_ledger": display_path(final_trade_ledger_path),
         },
     }
 
@@ -117,8 +150,20 @@ def load_live_market_snapshot(
     provider_value = provider.strip().lower()
     payload: dict[str, Any] | None = None
     selected_provider = provider_value
+    freshness_note = ""
+    stale = False
+    stale_seconds = 0
 
-    def try_mt5_payload() -> dict[str, Any] | None:
+    def format_age(total_seconds: int) -> str:
+        minutes, seconds = divmod(max(0, int(total_seconds)), 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}h {minutes}m {seconds}s"
+        if minutes > 0:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+    def try_mt5_bridge_payload() -> dict[str, Any] | None:
         try:
             return fetch_recent_rates(
                 symbol=mt5_symbol or symbol or "XAUUSD",
@@ -126,13 +171,19 @@ def load_live_market_snapshot(
                 count=outputsize,
             )
         except Exception:
-            try:
-                return load_exported_rates_csv(
-                    symbol=mt5_symbol or symbol or "XAUUSD",
-                    timeframe="M1",
-                )
-            except Exception:
-                return None
+            return None
+
+    def try_mt5_export_payload() -> dict[str, Any] | None:
+        try:
+            return load_exported_rates_csv(
+                symbol=mt5_symbol or symbol or "XAUUSD",
+                timeframe="M1",
+            )
+        except Exception:
+            return None
+
+    def try_mt5_payload() -> dict[str, Any] | None:
+        return try_mt5_bridge_payload() or try_mt5_export_payload()
 
     if provider_value in {"mt5", "mt5 local"}:
         selected_provider = "mt5"
@@ -143,6 +194,17 @@ def load_live_market_snapshot(
                 "error": (
                     "MT5 Local could not be reached. This provider works only on the same machine as a running "
                     "MetaTrader terminal, either through the direct bridge or through the MT5 live exporter CSV."
+                ),
+            }
+    elif provider_value in {"mt5 export", "mt5 exporter", "mt5 exporter csv"}:
+        selected_provider = "mt5_export"
+        payload = try_mt5_export_payload()
+        if payload is None:
+            return {
+                "enabled": False,
+                "error": (
+                    "MT5 exporter CSV could not be reached. Make sure the MT5 exporter is writing "
+                    "`xauusd_mt5_live.csv` into the local MetaTrader `MQL5/Files` folder."
                 ),
             }
     elif provider_value == "auto":
@@ -192,7 +254,7 @@ def load_live_market_snapshot(
                 "enabled": False,
                 "error": str(exc),
             }
-    elif selected_provider != "mt5":
+    elif not str(selected_provider).startswith("mt5"):
         return {
             "enabled": False,
             "error": f"Unsupported live provider: {provider}",
@@ -206,9 +268,24 @@ def load_live_market_snapshot(
 
     frame = pd.DataFrame(values)
     frame["datetime"] = pd.to_datetime(frame["datetime"])
+    resolved_provider = payload.get("meta", {}).get("provider", selected_provider)
+    if resolved_provider == "mt5_export":
+        source_path_text = payload.get("meta", {}).get("source_path")
+        if source_path_text:
+            source_path = Path(source_path_text)
+            if source_path.exists():
+                source_mtime = source_path.stat().st_mtime
+                source_modified_at = datetime.fromtimestamp(source_mtime)
+                stale_seconds = max(0, int(datetime.now().timestamp() - source_mtime))
+                stale = stale_seconds > 120
+                freshness_note = (
+                    f"MT5 exporter file last updated {format_age(stale_seconds)} ago "
+                    f"at {source_modified_at:%Y-%m-%d %H:%M:%S}."
+                )
+
     return {
         "enabled": True,
-        "provider": selected_provider,
+        "provider": resolved_provider,
         "meta": payload.get("meta", {}),
         "frame": frame,
         "latest": latest,
@@ -219,12 +296,15 @@ def load_live_market_snapshot(
             "volume_note",
             "Source volume is available." if payload.get("has_volume", False) else "Source volume is not available.",
         ),
+        "stale": stale,
+        "stale_seconds": stale_seconds,
+        "freshness_note": freshness_note,
         "display_symbol": (
             payload.get("meta", {}).get("symbol", mt5_symbol)
-            if selected_provider == "mt5"
+            if str(resolved_provider).startswith("mt5")
             else
             display_instrument(payload.get("meta", {}).get("instrument", symbol))
-            if selected_provider == "oanda"
+            if resolved_provider == "oanda"
             else payload.get("meta", {}).get("symbol", symbol)
         ),
     }
@@ -745,6 +825,13 @@ def build_paper_ledger_table(paper_ledger: pd.DataFrame, limit: int = 25) -> pd.
         "entry_time",
         "exit_time",
         "direction",
+        "volume_lots",
+        "risk_cash",
+        "entry_price",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "exit_price",
         "session_name",
         "exit_reason",
         "realized_r",
@@ -758,6 +845,12 @@ def build_paper_ledger_table(paper_ledger: pd.DataFrame, limit: int = 25) -> pd.
     for column in ("signal_time", "entry_time", "exit_time"):
         if column in table.columns:
             table[column] = table[column].astype(str)
+    for column in ("volume_lots",):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce").round(3)
+    for column in ("risk_cash", "entry_price", "stop_loss", "tp1", "tp2", "exit_price"):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
     return table.iloc[::-1].reset_index(drop=True)
 
 
@@ -851,6 +944,13 @@ def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 20
         "entry_time",
         "exit_time",
         "direction",
+        "volume_lots",
+        "risk_cash",
+        "entry_price",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "exit_price",
         "session_name",
         "exit_reason",
         "realized_r",
@@ -863,6 +963,12 @@ def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 20
     for column in ("snapshot_created_at", "signal_time", "entry_time", "exit_time"):
         if column in table.columns:
             table[column] = table[column].astype(str)
+    for column in ("volume_lots",):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce").round(3)
+    for column in ("risk_cash", "entry_price", "stop_loss", "tp1", "tp2", "exit_price"):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
     return table.iloc[::-1].reset_index(drop=True)
 
 

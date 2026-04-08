@@ -102,6 +102,14 @@ def get_mt5_experts_dir() -> Path | None:
     return experts_dir if experts_dir.exists() else None
 
 
+def get_mt5_scripts_dir() -> Path | None:
+    program_dir = get_mt5_program_dir()
+    if program_dir is None:
+        return None
+    scripts_dir = program_dir / "MQL5" / "Scripts"
+    return scripts_dir if scripts_dir.exists() else None
+
+
 def get_mt5_metaeditor_exe() -> Path | None:
     program_dir = get_mt5_program_dir()
     if program_dir is None:
@@ -408,3 +416,34 @@ def install_exporter_source(
         "source": str(source),
         "target": str(target_file),
     }
+
+
+def sync_mt5_file_artifact(path_like: str | Path) -> dict[str, str]:
+    files_dir = get_mt5_files_dir()
+    if files_dir is None:
+        raise RuntimeError("Could not find the MT5 MQL5/Files directory on this machine.")
+
+    source = resolve_repo_path(path_like)
+    if not source.exists():
+        raise FileNotFoundError(source)
+
+    repo_mt5_root = resolve_repo_path("mt5_expert_advisor/Files")
+    try:
+        relative = source.relative_to(repo_mt5_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"{display_path(source)} is not inside mt5_expert_advisor/Files and cannot be synced to MT5."
+        ) from exc
+
+    target = files_dir / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return {
+        "source": str(source),
+        "target": str(target),
+        "relative": str(relative),
+    }
+
+
+def sync_mt5_file_artifacts(paths: list[str | Path]) -> list[dict[str, str]]:
+    return [sync_mt5_file_artifact(path_like) for path_like in paths]

@@ -227,6 +227,67 @@ def render_metric_card(label: str, value: str, note: str = "") -> None:
     )
 
 
+def _coerce_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def format_count(value: object) -> str:
+    return f"{_coerce_int(value):,}"
+
+
+def build_trade_learning_card(report: dict) -> tuple[str, str]:
+    learning = report.get("learning", {})
+    closed_trades = _coerce_int(learning.get("closed_trades", 0))
+    actionable_signals = _coerce_int(learning.get("actionable_signals", 0))
+
+    required_closed_trades = 0
+    for check in learning.get("checks", []):
+        if str(check.get("check", "")) == "closed_trades":
+            required_closed_trades = _coerce_int(check.get("required", 0))
+            break
+
+    if required_closed_trades > 0:
+        progress_note = f"{closed_trades:,}/{required_closed_trades:,} needed for batch retrain"
+    else:
+        progress_note = f"{actionable_signals:,} actionable signals tracked"
+
+    readiness_note = "retrain ready" if learning.get("retrain_ready") else "collecting more trade feedback"
+    return format_count(closed_trades), f"{progress_note} | {readiness_note}"
+
+
+def build_neural_connections_card(report: dict) -> tuple[str, str]:
+    learning = report.get("learning", {})
+    neural = report.get("neural", {})
+    closed_trades = _coerce_int(learning.get("closed_trades", 0))
+    trainable_connections = _coerce_int(neural.get("trainable_parameter_count", neural.get("parameter_count", 0)))
+    neural_status = str(neural.get("status", "unknown")).strip() or "unknown"
+
+    if trainable_connections > 0:
+        return format_count(trainable_connections), f"{closed_trades:,} closed trade samples available for retraining"
+    if neural_status == "disabled":
+        return "baseline only", f"{closed_trades:,} trade samples tracked while the neural layer is off"
+    if neural_status == "ok":
+        return "trained", f"{closed_trades:,} trade samples tracked | saved report has no connection count"
+    return neural_status.upper(), f"{closed_trades:,} trade samples tracked"
+
+
+def build_learning_explainer(report: dict) -> str:
+    neural = report.get("neural", {})
+    trainable_connections = _coerce_int(neural.get("trainable_parameter_count", neural.get("parameter_count", 0)))
+    if trainable_connections > 0:
+        return (
+            "Trade Learning counts closed LONG/SHORT paper trades eligible for retraining. "
+            "Neural Connections shows the active PatchTST trainable weights."
+        )
+    return (
+        "Trade Learning counts closed LONG/SHORT paper trades eligible for retraining. "
+        "This MT5 live path is still on the fast baseline, so it does not expose per-weight neural updates yet."
+    )
+
+
 def format_utc_and_berlin(timestamp_like: str) -> str:
     timestamp = str(timestamp_like or "").strip()
     if not timestamp:
@@ -274,6 +335,35 @@ def build_overlap_window_note(report: dict) -> str:
         "Setup hunt window: "
         f"{window_start_utc.strftime('%H:%M')} - {window_end_utc.strftime('%H:%M')} UTC = "
         f"{window_start_berlin.strftime('%H:%M')} - {window_end_berlin.strftime('%H:%M %Z')}"
+    )
+
+
+def build_execution_policy_note(report: dict) -> str:
+    policy = report.get("execution_policy", {})
+    if not policy:
+        return ""
+    broker_mode = str(policy.get("broker_execution_mode", "unknown")).replace("_", " ")
+    setup_source = str(policy.get("trade_setup_source", "unknown")).replace("_", " ")
+    learning_source = str(policy.get("learning_source", "unknown")).replace("_", " ")
+    streamlit_scope = str(policy.get("streamlit_scope", "unknown")).replace("_", " ")
+    requires_directive = bool(policy.get("requires_trade_directive", False))
+    sync_error = str(policy.get("trade_directive_sync_error", "")).strip()
+    synced_targets = policy.get("trade_directive_synced_targets", [])
+    if requires_directive:
+        if sync_error:
+            directive_sync = "error"
+        elif synced_targets:
+            directive_sync = "ready"
+        else:
+            directive_sync = "pending"
+    else:
+        directive_sync = "not required"
+    return (
+        f"Broker execution: {broker_mode} | "
+        f"trade setup source: {setup_source} | "
+        f"learning source: {learning_source} | "
+        f"Streamlit scope: {streamlit_scope} | "
+        f"trade directive sync: {directive_sync}"
     )
 
 
@@ -328,21 +418,21 @@ def resolve_active_report_path(report_source: str, live_provider: str, custom_pa
         return DEFAULT_MT5_RESEARCH_REPORT_OUTPUT
 
     mt5_report = resolve_repo_path(DEFAULT_MT5_RESEARCH_REPORT_OUTPUT)
-    if live_provider in {"Auto", "MT5 Local"} and mt5_report.exists():
+    if live_provider in {"Auto", "MT5 Local", "MT5 Exporter"} and mt5_report.exists():
         return DEFAULT_MT5_RESEARCH_REPORT_OUTPUT
     return DEFAULT_RESEARCH_REPORT_OUTPUT
 
 
 def sidebar_state() -> dict[str, object]:
     st.sidebar.markdown("## Research Control")
-    live_provider = st.sidebar.selectbox("Live provider", options=["Auto", "MT5 Local", "OANDA", "Twelve Data"], index=0)
+    live_provider = st.sidebar.selectbox("Live provider", options=["Auto", "MT5 Local", "MT5 Exporter", "OANDA", "Twelve Data"], index=0)
     report_source = st.sidebar.selectbox(
         "Report source",
         options=["Auto", "MT5 Live Paper", "Research Baseline", "Custom"],
         index=0,
         help="Auto prefers the MT5 live paper-trading report whenever MT5 Local is active and a local MT5 report exists.",
     )
-    custom_default = DEFAULT_MT5_RESEARCH_REPORT_OUTPUT if live_provider in {"Auto", "MT5 Local"} else DEFAULT_RESEARCH_REPORT_OUTPUT
+    custom_default = DEFAULT_MT5_RESEARCH_REPORT_OUTPUT if live_provider in {"Auto", "MT5 Local", "MT5 Exporter"} else DEFAULT_RESEARCH_REPORT_OUTPUT
     custom_report_path = (
         st.sidebar.text_input("Custom report path", value=custom_default)
         if report_source == "Custom"
@@ -353,7 +443,7 @@ def sidebar_state() -> dict[str, object]:
     chart_bars = st.sidebar.slider("Chart bars", min_value=120, max_value=720, value=240, step=20)
     probability_bars = st.sidebar.slider("Probability bars", min_value=60, max_value=600, value=180, step=20)
     live_enabled = st.sidebar.toggle("Load live market snapshot", value=True)
-    if live_provider == "MT5 Local":
+    if live_provider in {"MT5 Local", "MT5 Exporter"}:
         default_symbol = "XAUUSD"
     elif live_provider == "OANDA":
         default_symbol = "XAU_USD"
@@ -376,9 +466,9 @@ def sidebar_state() -> dict[str, object]:
     st.sidebar.markdown("## Run Pipeline")
     live_command = (
         "python src/install_mt5_exporter.py\n"
-        "python src/run_mt5_research_pipeline.py --source-mode auto\n"
+        "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto\n"
         "python src/run_mt5_research_worker.py --poll-seconds 15"
-        if live_provider == "MT5 Local"
+        if live_provider in {"MT5 Local", "MT5 Exporter"}
         else
         "python src/run_live_oanda_pipeline.py"
         if live_provider == "OANDA"
@@ -387,7 +477,7 @@ def sidebar_state() -> dict[str, object]:
     st.sidebar.code(
         live_command
         if live_provider != "Auto"
-        else "python src/run_live_mt5_pipeline.py\npython src/run_live_oanda_pipeline.py\npython src/run_live_twelvedata_pipeline.py",
+        else "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto\npython src/run_live_oanda_pipeline.py\npython src/run_live_twelvedata_pipeline.py",
         language="bash",
     )
     st.sidebar.caption(
@@ -405,7 +495,7 @@ def sidebar_state() -> dict[str, object]:
         "live_provider": live_provider,
         "live_enabled": live_enabled,
         "live_symbol": live_symbol,
-        "mt5_symbol": live_symbol if live_provider == "MT5 Local" else "XAUUSD",
+        "mt5_symbol": live_symbol if live_provider in {"MT5 Local", "MT5 Exporter"} else "XAUUSD",
         "live_window": live_window,
         "auto_refresh_enabled": auto_refresh_enabled,
         "auto_refresh_seconds": auto_refresh_seconds,
@@ -496,6 +586,9 @@ def render_header(report: dict) -> None:
             f"| {mt5_live_source.get('start', 'n/a')} -> {mt5_live_source.get('end', 'n/a')}"
         )
         st.caption(build_overlap_window_note(report))
+    execution_policy_note = build_execution_policy_note(report)
+    if execution_policy_note:
+        st.caption(execution_policy_note)
     st.caption(
         f"Rows: standardized {dataset_summary.get('standardized_rows', 0):,} | "
         f"research {dataset_summary.get('research_rows', 0):,} | "
@@ -513,6 +606,7 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     latest = report.get("latest_signal", {})
     learning = report.get("learning", {})
     manual_override = report.get("manual_override", {})
+    trade_learning_value, trade_learning_note = build_trade_learning_card(report)
     render_header(report)
 
     top_cols = st.columns(6)
@@ -538,22 +632,27 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     with risk_cols[2]:
         render_metric_card("Max Drawdown", f"{float(paper_summary.get('max_drawdown', 0.0)):.1%}", "Risk ceiling")
     with risk_cols[3]:
-        render_metric_card("Learning", "READY" if learning.get("retrain_ready") else "WAIT", f"{int(learning.get('closed_trades', 0))} closed trades")
+        render_metric_card("Trade Learning", trade_learning_value, trade_learning_note)
     with risk_cols[4]:
         blockers = learning.get("retrain_blockers", [])
         render_metric_card("Learning Gate", str(len(blockers)), "all checks passed" if not blockers else "|".join(blockers))
 
-    capital_cols = st.columns(4)
+    capital_cols = st.columns(5)
     starting_equity = float(paper_summary.get("starting_equity", 0.0))
     ending_equity = float(paper_summary.get("ending_equity", starting_equity))
     net_pnl_cash = float(paper_summary.get("net_pnl_cash", ending_equity - starting_equity))
+    risk_per_trade = float(paper_summary.get("risk_per_trade", 0.0))
+    risk_cash = ending_equity * risk_per_trade
+    sizing_mode = str(paper_summary.get("position_sizing_mode", "") or "equity_risk")
     with capital_cols[0]:
         render_metric_card("Capital", f"{ending_equity:.2f}", f"start {starting_equity:.2f}")
     with capital_cols[1]:
-        render_metric_card("Net PnL", f"{net_pnl_cash:+.2f}", "paper equity delta")
+        render_metric_card("Risk / Trade", f"{risk_cash:.2f}", f"{risk_per_trade:.2%} of current capital | {sizing_mode}")
     with capital_cols[2]:
-        render_metric_card("Wins", str(int(paper_summary.get("win_count", 0))), "closed winners")
+        render_metric_card("Net PnL", f"{net_pnl_cash:+.2f}", "paper equity delta")
     with capital_cols[3]:
+        render_metric_card("Wins", str(int(paper_summary.get("win_count", 0))), "closed winners")
+    with capital_cols[4]:
         render_metric_card("Losses", str(int(paper_summary.get("loss_count", 0))), "closed losers")
 
     saved_summary = build_trade_period_summary_table(final_trade_ledger)
@@ -595,6 +694,12 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
             )
             provider_name = str(live_snapshot.get("provider", "unknown")).replace("_", " ").title()
             st.caption(f"Provider: {provider_name} | {live_snapshot.get('volume_note', '')}")
+            freshness_note = str(live_snapshot.get("freshness_note", "")).strip()
+            if freshness_note:
+                if bool(live_snapshot.get("stale", False)):
+                    st.warning(freshness_note)
+                else:
+                    st.caption(freshness_note)
         else:
             st.warning(live_snapshot.get("error", "Live market snapshot unavailable."))
 
@@ -744,15 +849,21 @@ def render_model_lab_page(settings: dict[str, object]) -> None:
         render_metric_card("Ensemble Status", str(ensemble.get("status", "unknown")), "Probability blend")
 
     learning = report.get("learning", {})
-    learning_cols = st.columns(4)
+    trade_learning_value, trade_learning_note = build_trade_learning_card(report)
+    neural_connections_value, neural_connections_note = build_neural_connections_card(report)
+    learning_cols = st.columns(5)
     with learning_cols[0]:
         render_metric_card("Batch Retrain", "READY" if learning.get("retrain_ready") else "NOT READY", learning.get("recommended_action", "collect_more_feedback"))
     with learning_cols[1]:
-        render_metric_card("Closed Trades", str(int(learning.get("closed_trades", 0))), f"{int(learning.get('trading_days', 0))} trading days")
+        render_metric_card("Trade Learning", trade_learning_value, trade_learning_note)
     with learning_cols[2]:
         render_metric_card("Direction Mix", f"L {int(learning.get('long_trades', 0))} / S {int(learning.get('short_trades', 0))}", learning.get("dominant_direction", ""))
     with learning_cols[3]:
         render_metric_card("Session Concentration", f"{float(learning.get('dominant_session_share', 0.0)):.1%}", learning.get("dominant_session", ""))
+    with learning_cols[4]:
+        render_metric_card("Neural Connections", neural_connections_value, neural_connections_note)
+
+    st.caption(build_learning_explainer(report))
 
     st.markdown("#### Baseline vs Neural Metrics")
     st.dataframe(build_model_metric_table(report), width="stretch", hide_index=True)

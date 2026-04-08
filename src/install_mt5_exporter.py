@@ -117,7 +117,8 @@ def main() -> None:
     print("Next in MT5:")
     print("  1. Open Navigator -> Expert Advisors -> OpenAI")
     print("  2. Attach XAUUSD_Live_Data_Exporter to an XAUUSD M1 chart")
-    print("  3. Enable Algo Trading")
+    print("  3. Keep the exporter on its own chart if XAUUSD_AI_Bot is also attached elsewhere")
+    print("  4. Enable Algo Trading")
 
 
 if __name__ == "__main__":
