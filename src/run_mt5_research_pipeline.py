@@ -917,25 +917,25 @@ def build_learning_status(feedback: pd.DataFrame, config: dict[str, Any]) -> dic
     checks = [
         {
             "check": "closed_trades",
-            "required": int(learning_cfg["batch_min_closed_trades"]),
+            "required": str(int(learning_cfg["batch_min_closed_trades"])),
             "current": closed_trades,
             "passed": closed_trades >= int(learning_cfg["batch_min_closed_trades"]),
         },
         {
             "check": "trading_days",
-            "required": int(learning_cfg["batch_min_days"]),
+            "required": str(int(learning_cfg["batch_min_days"])),
             "current": trading_days,
             "passed": trading_days >= int(learning_cfg["batch_min_days"]),
         },
         {
             "check": "long_trades",
-            "required": int(learning_cfg["batch_min_long_trades"]),
+            "required": str(int(learning_cfg["batch_min_long_trades"])),
             "current": long_trades,
             "passed": long_trades >= int(learning_cfg["batch_min_long_trades"]),
         },
         {
             "check": "short_trades",
-            "required": int(learning_cfg["batch_min_short_trades"]),
+            "required": str(int(learning_cfg["batch_min_short_trades"])),
             "current": short_trades,
             "passed": short_trades >= int(learning_cfg["batch_min_short_trades"]),
         },
