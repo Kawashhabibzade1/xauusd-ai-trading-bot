@@ -190,7 +190,17 @@ def run_live_pipeline(
         [{"name": "Overlap", "start": "13:00", "end": "16:59", "max_trades": 0}]
     )
     active_hunt_timezone = str(hunt_timezone or "UTC")
-    overlap = filter_hunt_windows_frame(standardized, timezone_name=active_hunt_timezone, windows=active_hunt_windows)
+    source_timezone = (
+        active_hunt_timezone
+        if fetch_result.get("provider") == "mt5_export"
+        else str(fetch_result.get("timezone", "UTC") or "UTC")
+    )
+    overlap = filter_hunt_windows_frame(
+        standardized,
+        timezone_name=active_hunt_timezone,
+        windows=active_hunt_windows,
+        source_timezone_name=source_timezone,
+    )
     overlap_output_path = ensure_parent_dir(overlap_output)
     overlap.to_csv(overlap_output_path, index=False)
 
@@ -278,7 +288,7 @@ def run_live_pipeline(
         "source_provider": fetch_result.get("provider", "mt5_local"),
         "symbol": fetch_result["symbol"],
         "interval": fetch_result["interval"],
-        "source_timezone": fetch_result["timezone"],
+        "source_timezone": source_timezone,
         "source_rows": fetch_result["rows"],
         "source_start": fetch_result["start"],
         "source_end": fetch_result["end"],

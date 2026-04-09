@@ -436,6 +436,12 @@ def sync_mt5_file_artifact(path_like: str | Path) -> dict[str, str]:
         ) from exc
 
     target = files_dir / relative
+    if target.exists() and target.resolve() == source.resolve():
+        return {
+            "source": str(source),
+            "target": str(target),
+            "relative": str(relative),
+        }
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
     return {

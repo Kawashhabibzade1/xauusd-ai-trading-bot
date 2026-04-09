@@ -1009,7 +1009,7 @@ void OnTick()
 
       datetime closed_bar_server_time = iTime(_Symbol, PERIOD_CURRENT, 1);
       datetime closed_bar_utc = ToUtc(closed_bar_server_time);
-      if(!IsOverlapBar(closed_bar_utc))
+      if(!InpRequireTradeDirective && !IsOverlapBar(closed_bar_utc))
          return;
 
       float features[FEATURE_COUNT];

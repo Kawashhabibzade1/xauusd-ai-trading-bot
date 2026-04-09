@@ -258,7 +258,11 @@ def derive_regime(row: pd.Series) -> str:
     return "Range"
 
 
-def build_prediction_frame(validation_df: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+def build_prediction_frame(
+    validation_df: pd.DataFrame,
+    config: dict[str, Any],
+    source_timezone: str = "UTC",
+) -> pd.DataFrame:
     trading_cfg = config["trading"]
     labels_cfg = config["labels"]
     ensemble_cfg = config["ensemble"]
@@ -272,7 +276,12 @@ def build_prediction_frame(validation_df: pd.DataFrame, config: dict[str, Any]) 
         frame["hour"] = frame["time"].dt.hour
     frame["market_session_name"] = frame["hour"].fillna(0).astype(int).map(session_name_from_hour)
     if hunt_windows:
-        window_context = annotate_hunt_windows(frame.loc[:, ["time"]], timezone_name=hunt_timezone, windows=hunt_windows)
+        window_context = annotate_hunt_windows(
+            frame.loc[:, ["time"]],
+            timezone_name=hunt_timezone,
+            windows=hunt_windows,
+            source_timezone_name=source_timezone,
+        )
         frame["trade_window_name"] = window_context["hunt_window_name"].astype(str)
         frame["trade_window_allowed"] = window_context["hunt_window_allowed"].astype(int)
         frame["trade_window_max_trades"] = window_context["hunt_window_trade_limit"].astype(int)
@@ -431,6 +440,7 @@ def simulate_paper_trades(
     raw_frame: pd.DataFrame,
     config: dict[str, Any],
     manual_override: dict[str, Any] | None = None,
+    source_timezone: str = "UTC",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
     paper_cfg = config["trading"]["paper"]
     hunt_timezone = str(config.get("trading", {}).get("hunt_timezone", "UTC"))
@@ -460,7 +470,7 @@ def simulate_paper_trades(
     for index, row in working.iterrows():
         signal_time = pd.Timestamp(row["time"])
         if signal_time.tzinfo is None:
-            local_signal_time = signal_time.tz_localize("UTC").tz_convert(hunt_timezone)
+            local_signal_time = signal_time.tz_localize(source_timezone).tz_convert(hunt_timezone)
         else:
             local_signal_time = signal_time.tz_convert(hunt_timezone)
         signal_day = str(local_signal_time.date())
@@ -1585,6 +1595,7 @@ def run_mt5_research_pipeline(
         skip_confidence_analysis=skip_confidence_analysis,
         skip_backtest=skip_backtest,
     )
+    source_timezone = str(live_report.get("source_timezone", "UTC") or "UTC")
 
     validation_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_MT5_VALIDATION_OUTPUT))
     feature_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_FEATURE_OUTPUT))
@@ -1593,9 +1604,15 @@ def run_mt5_research_pipeline(
     validation_df = validation_df.merge(feature_subset, on="time", how="left")
     raw_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_RAW_INPUT))
     manual_override = load_manual_override(manual_override_output)
-    predictions = build_prediction_frame(validation_df, config_payload)
+    predictions = build_prediction_frame(validation_df, config_payload, source_timezone=source_timezone)
     overlays = build_overlay_objects(predictions)
-    predictions, paper_ledger, paper_summary, manual_override = simulate_paper_trades(predictions, raw_df, config_payload, manual_override)
+    predictions, paper_ledger, paper_summary, manual_override = simulate_paper_trades(
+        predictions,
+        raw_df,
+        config_payload,
+        manual_override,
+        source_timezone=source_timezone,
+    )
     feedback = build_learning_feedback(predictions, paper_ledger)
     learning_status = build_learning_status(feedback, config_payload)
     json_dump(manual_override, manual_override_output)

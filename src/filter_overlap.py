@@ -21,8 +21,8 @@ from pipeline_contract import (
 UTC = ZoneInfo("UTC")
 DEFAULT_HUNT_TIMEZONE = "Europe/Berlin"
 DEFAULT_HUNT_WINDOWS = [
-    {"name": "Night Hunt", "start": "23:00", "end": "07:00", "max_trades": 5},
-    {"name": "Morning Hunt", "start": "07:45", "end": "13:00", "max_trades": 5},
+    {"name": "Night Hunt", "start": "00:00", "end": "08:00", "max_trades": 5},
+    {"name": "Morning Hunt", "start": "08:00", "end": "13:00", "max_trades": 5},
     {"name": "Afternoon Hunt", "start": "15:00", "end": "17:00", "max_trades": 5},
 ]
 
@@ -67,11 +67,12 @@ def annotate_hunt_windows(
     frame: pd.DataFrame,
     timezone_name: str = DEFAULT_HUNT_TIMEZONE,
     windows: list[dict[str, Any]] | None = None,
+    source_timezone_name: str = "UTC",
 ) -> pd.DataFrame:
     annotated = frame.copy()
     annotated["time"] = pd.to_datetime(annotated["time"])
     if getattr(annotated["time"].dt, "tz", None) is None:
-        local_times = annotated["time"].dt.tz_localize(UTC).dt.tz_convert(timezone_name)
+        local_times = annotated["time"].dt.tz_localize(source_timezone_name).dt.tz_convert(timezone_name)
     else:
         local_times = annotated["time"].dt.tz_convert(timezone_name)
 
@@ -109,8 +110,14 @@ def filter_hunt_windows_frame(
     df: pd.DataFrame,
     timezone_name: str = DEFAULT_HUNT_TIMEZONE,
     windows: list[dict[str, Any]] | None = None,
+    source_timezone_name: str = "UTC",
 ) -> pd.DataFrame:
-    annotated = annotate_hunt_windows(df, timezone_name=timezone_name, windows=windows)
+    annotated = annotate_hunt_windows(
+        df,
+        timezone_name=timezone_name,
+        windows=windows,
+        source_timezone_name=source_timezone_name,
+    )
     filtered = annotated.loc[
         annotated["hunt_window_allowed"],
         ["time", "open", "high", "low", "close", "volume"],
