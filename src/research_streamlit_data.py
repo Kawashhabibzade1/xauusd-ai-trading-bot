@@ -27,20 +27,15 @@ from pipeline_contract import (
     display_path,
     resolve_repo_path,
 )
-from mt5_client import fetch_recent_rates, load_exported_rates_csv
-from oanda_client import (
-    display_instrument,
-    fetch_instrument_candles,
-    normalize_oanda_instrument,
-    resolve_api_token as resolve_oanda_token,
-)
-from twelvedata_client import fetch_time_series, resolve_api_key
+from mt5_client import DEFAULT_MT5_FILES_DIR, fetch_recent_rates, load_exported_rates_csv, load_mt5_account_snapshot
 
 
 SAFE_RESEARCH_OUTPUT_ROOTS = (
     resolve_repo_path("data/research"),
     resolve_repo_path("data/live/research_mt5"),
 )
+DEFAULT_MT5_BROKER_TRADE_LOG_PATH = DEFAULT_MT5_FILES_DIR / "logs" / "xauusd_ai_trades.csv"
+DEFAULT_MT5_ACCOUNT_SNAPSHOT_PATH = DEFAULT_MT5_FILES_DIR / "config" / "mt5_account_snapshot.csv"
 
 
 def _is_safe_research_output(path: Path) -> bool:
@@ -79,8 +74,7 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     live_report = _load_json(report_path)
     live_outputs = live_report.get("outputs", {})
     snapshot_root = _resolve_safe_snapshot_root(live_outputs.get("snapshot_root", ""))
-    snapshot_report_path = snapshot_root / "report.json" if snapshot_root else None
-    report = _load_json(snapshot_report_path) if snapshot_report_path and snapshot_report_path.exists() else live_report
+    report = live_report
     mode = str(report.get("mode", "")).strip().lower()
     is_mt5_live_paper = mode == "mt5_live_paper"
     default_predictions_path = DEFAULT_MT5_RESEARCH_PREDICTIONS_OUTPUT if is_mt5_live_paper else DEFAULT_RESEARCH_PREDICTIONS_OUTPUT
@@ -156,6 +150,63 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     else:
         final_trade_ledger = trade_history.copy()
 
+    broker_trade_log_path = DEFAULT_MT5_BROKER_TRADE_LOG_PATH
+    if broker_trade_log_path.exists() and broker_trade_log_path.stat().st_size > 0:
+        try:
+            broker_trade_log = pd.read_csv(broker_trade_log_path)
+        except EmptyDataError:
+            broker_trade_log = pd.DataFrame()
+        if "time_utc" in broker_trade_log.columns:
+            broker_trade_log["time_utc"] = pd.to_datetime(broker_trade_log["time_utc"], errors="coerce", utc=True)
+    else:
+        broker_trade_log = pd.DataFrame()
+
+    if is_mt5_live_paper and DEFAULT_MT5_ACCOUNT_SNAPSHOT_PATH.exists():
+        try:
+            live_snapshot = load_mt5_account_snapshot()
+        except Exception:
+            live_snapshot = None
+        if isinstance(live_snapshot, dict) and live_snapshot:
+            mt5_account = dict(report.get("mt5_account", {}) or {})
+            mt5_account.update(
+                {
+                    "connected": True,
+                    "login": int(live_snapshot.get("login", 0) or 0),
+                    "server": str(live_snapshot.get("server", "") or ""),
+                    "currency": str(live_snapshot.get("currency", "") or ""),
+                    "balance": float(live_snapshot.get("balance", 0.0) or 0.0),
+                    "equity": float(live_snapshot.get("equity", 0.0) or 0.0),
+                    "leverage": int(live_snapshot.get("leverage", 0) or 0),
+                    "contract_size": float(live_snapshot.get("contract_size", 0.0) or 0.0),
+                }
+            )
+            report["mt5_account"] = mt5_account
+
+            balance = float(mt5_account.get("balance", 0.0) or 0.0)
+            equity = float(mt5_account.get("equity", 0.0) or 0.0)
+            for section_name in ("paper_trading", "current_run_paper_trading", "frozen_paper_trading"):
+                section = report.get(section_name)
+                if not isinstance(section, dict):
+                    continue
+                section["mt5_balance"] = balance
+                section["mt5_equity"] = equity
+                section["capital_source"] = "mt5_account_equity"
+                section["display_starting_equity"] = balance
+                section["display_ending_equity"] = equity
+                section["display_net_pnl_cash"] = equity - balance
+
+            runtime_health = dict(report.get("mt5_runtime_health", {}) or {})
+            account_snapshot_status = dict(runtime_health.get("account_snapshot", {}) or {})
+            account_snapshot_status["path"] = str(DEFAULT_MT5_ACCOUNT_SNAPSHOT_PATH)
+            account_snapshot_status["exists"] = True
+            account_snapshot_status["status"] = "live"
+            account_snapshot_status["stale"] = False
+            runtime_health["account_snapshot"] = account_snapshot_status
+            summary = dict(runtime_health.get("summary", {}) or {})
+            summary["account_snapshot_live"] = True
+            runtime_health["summary"] = summary
+            report["mt5_runtime_health"] = runtime_health
+
     overlays = _load_json(overlays_path)
     latest_signal = report.get("latest_signal", {})
     return {
@@ -164,6 +215,7 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
         "paper_ledger": paper_ledger,
         "trade_history": trade_history,
         "final_trade_ledger": final_trade_ledger,
+        "broker_trade_log": broker_trade_log,
         "overlays": overlays,
         "latest_signal": latest_signal,
         "paths": {
@@ -173,14 +225,13 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
             "paper": display_path(paper_path),
             "trade_history": display_path(trade_history_path),
             "final_trade_ledger": display_path(final_trade_ledger_path),
+            "broker_trade_log": display_path(broker_trade_log_path),
         },
     }
 
 
 def load_live_market_snapshot(
     provider: str = "auto",
-    env_name: str = "TWELVEDATA_API_KEY",
-    oanda_env_name: str = "OANDA_API_TOKEN",
     mt5_symbol: str = "XAUUSD",
     symbol: str = "XAU/USD",
     outputsize: int = 120,
@@ -245,52 +296,20 @@ def load_live_market_snapshot(
                     "`xauusd_mt5_live.csv` into the local MetaTrader `MQL5/Files` folder."
                 ),
             }
+    elif provider_value in {"oanda", "twelvedata"}:
+        return {
+            "enabled": False,
+            "error": f"{provider} support is disabled in this project. Use MT5 Local or MT5 Exporter.",
+        }
     elif provider_value == "auto":
         mt5_payload = try_mt5_payload()
         if mt5_payload is not None:
             selected_provider = "mt5"
             payload = mt5_payload
-        elif resolve_oanda_token(oanda_env_name):
-            selected_provider = "oanda"
-        elif resolve_api_key(env_name):
-            selected_provider = "twelvedata"
         else:
-            selected_provider = "twelvedata"
-
-    if selected_provider == "oanda":
-        api_token = resolve_oanda_token(oanda_env_name)
-        if not api_token:
             return {
                 "enabled": False,
-                "error": f"Environment variable {oanda_env_name} is not set.",
-            }
-        instrument = normalize_oanda_instrument(symbol or "XAU_USD")
-        try:
-            payload = fetch_instrument_candles(
-                api_token=api_token,
-                instrument=instrument,
-                granularity="M1",
-                count=outputsize,
-            )
-        except Exception as exc:
-            return {
-                "enabled": False,
-                "error": str(exc),
-            }
-    elif selected_provider == "twelvedata":
-        api_key = resolve_api_key(env_name)
-        if not api_key:
-            return {
-                "enabled": False,
-                "error": f"Environment variable {env_name} is not set.",
-            }
-        td_symbol = (symbol or "XAU/USD").strip().upper().replace("_", "/")
-        try:
-            payload = fetch_time_series(api_key=api_key, symbol=td_symbol, outputsize=outputsize)
-        except Exception as exc:
-            return {
-                "enabled": False,
-                "error": str(exc),
+                "error": "No local MT5 source is available. OANDA and Twelve Data support are disabled.",
             }
     elif not str(selected_provider).startswith("mt5"):
         return {
@@ -337,14 +356,7 @@ def load_live_market_snapshot(
         "stale": stale,
         "stale_seconds": stale_seconds,
         "freshness_note": freshness_note,
-        "display_symbol": (
-            payload.get("meta", {}).get("symbol", mt5_symbol)
-            if str(resolved_provider).startswith("mt5")
-            else
-            display_instrument(payload.get("meta", {}).get("instrument", symbol))
-            if resolved_provider == "oanda"
-            else payload.get("meta", {}).get("symbol", symbol)
-        ),
+        "display_symbol": payload.get("meta", {}).get("symbol", mt5_symbol if str(resolved_provider).startswith("mt5") else symbol),
     }
 
 
@@ -894,6 +906,13 @@ def build_paper_ledger_table(paper_ledger: pd.DataFrame, limit: int = 25) -> pd.
     for column in ("risk_cash", "entry_price", "stop_loss", "tp1", "tp2", "exit_price"):
         if column in table.columns:
             table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
+    table = table.rename(
+        columns={
+            "pnl_cash": "paper_pnl_cash",
+            "equity_before": "paper_equity_before",
+            "equity_after": "paper_equity_after",
+        }
+    )
     return table.iloc[::-1].reset_index(drop=True)
 
 
@@ -1031,6 +1050,43 @@ def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 20
         if column in table.columns:
             table[column] = pd.to_numeric(table[column], errors="coerce").round(3)
     for column in ("risk_cash", "entry_price", "stop_loss", "tp1", "tp2", "exit_price"):
+        if column in table.columns:
+            table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
+    table = table.rename(
+        columns={
+            "pnl_cash": "paper_pnl_cash",
+            "equity_after": "paper_equity_after",
+        }
+    )
+    return table.iloc[::-1].reset_index(drop=True)
+
+
+def build_broker_trade_log_table(trade_log: pd.DataFrame, limit: int = 100) -> pd.DataFrame:
+    if trade_log.empty:
+        return trade_log
+
+    columns = [
+        "time_utc",
+        "action",
+        "direction",
+        "confidence",
+        "volume",
+        "entry_price",
+        "stop_loss",
+        "take_profit",
+        "spread_points",
+        "retcode",
+        "retcode_desc",
+        "note",
+    ]
+    table = trade_log.loc[:, [column for column in columns if column in trade_log.columns]].tail(limit).copy()
+    if "time_utc" in table.columns:
+        table["time_utc"] = (
+            table["time_utc"]
+            .astype(str)
+            .replace({"NaT": "", "nan": "", "None": ""})
+        )
+    for column in ("confidence", "volume", "entry_price", "stop_loss", "take_profit", "spread_points"):
         if column in table.columns:
             table[column] = pd.to_numeric(table[column], errors="coerce").round(2)
     return table.iloc[::-1].reset_index(drop=True)

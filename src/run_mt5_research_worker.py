@@ -25,8 +25,8 @@ from pipeline_contract import (
     json_dump,
     resolve_repo_path,
 )
+from env_utils import resolve_env_value
 from run_mt5_research_pipeline import run_mt5_research_pipeline
-from twelvedata_client import resolve_env_value
 
 
 DEFAULT_TELEGRAM_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
@@ -129,34 +129,30 @@ def load_latest_trade_ready_signal(predictions_output: str) -> dict[str, Any] | 
     if not path.exists():
         return None
 
-    latest_row: dict[str, str] | None = None
+    latest_ready_signal: dict[str, Any] | None = None
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            latest_row = row
+            signal = str(row.get("recommended_trade", "")).strip().upper()
+            gate_status = str(row.get("gate_status", "")).strip().upper()
+            paper_status = str(row.get("paper_status", "")).strip().upper()
+            signal_time_text = str(row.get("time", "")).strip()
+            signal_time = parse_signal_time(signal_time_text)
+            if signal not in {"LONG", "SHORT"} or gate_status != "READY" or paper_status != "SIGNAL_READY" or signal_time is None:
+                continue
+            latest_ready_signal = {
+                "signal": signal,
+                "gate_status": gate_status,
+                "paper_status": paper_status,
+                "signal_time": signal_time_text,
+                "symbol": str(row.get("symbol", "")).strip(),
+                "session_name": str(row.get("session_name", "")).strip(),
+                "entry_price": float(row.get("entry_price", 0.0) or 0.0),
+                "setup_score": float(row.get("setup_score", 0.0) or 0.0),
+                "expected_value": float(row.get("expected_value", 0.0) or 0.0),
+            }
 
-    if latest_row is None:
-        return None
-
-    signal = str(latest_row.get("recommended_trade", "")).strip().upper()
-    gate_status = str(latest_row.get("gate_status", "")).strip().upper()
-    paper_status = str(latest_row.get("paper_status", "")).strip().upper()
-    signal_time_text = str(latest_row.get("time", "")).strip()
-    signal_time = parse_signal_time(signal_time_text)
-    if signal not in {"LONG", "SHORT"} or gate_status != "READY" or paper_status != "SIGNAL_READY" or signal_time is None:
-        return None
-
-    return {
-        "signal": signal,
-        "gate_status": gate_status,
-        "paper_status": paper_status,
-        "signal_time": signal_time_text,
-        "symbol": str(latest_row.get("symbol", "")).strip(),
-        "session_name": str(latest_row.get("session_name", "")).strip(),
-        "entry_price": float(latest_row.get("entry_price", 0.0) or 0.0),
-        "setup_score": float(latest_row.get("setup_score", 0.0) or 0.0),
-        "expected_value": float(latest_row.get("expected_value", 0.0) or 0.0),
-    }
+    return latest_ready_signal
 
 
 def escape_applescript(value: str) -> str:
@@ -377,7 +373,7 @@ def main() -> None:
                     print(f"[{error_state['last_run_time']}] Worker cycle failed: {exc}")
                     if args.once:
                         raise
-                    time.sleep(max(5, args.poll_seconds))
+                    time.sleep(max(1, args.poll_seconds))
                     continue
                 state["source_file"] = str(source)
                 state["source_mtime"] = current_mtime
@@ -404,7 +400,7 @@ def main() -> None:
 
         if args.once:
             break
-        time.sleep(max(5, args.poll_seconds))
+        time.sleep(max(1, args.poll_seconds))
 
 
 if __name__ == "__main__":

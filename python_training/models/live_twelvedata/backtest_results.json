@@ -4,13 +4,13 @@
     "confidence_threshold": 0.55,
     "initial_capital": 50.0
   },
-  "signals_retained": 46,
+  "signals_retained": 67,
   "performance": {
-    "total_trades": 0,
-    "win_rate": 0.0,
-    "profit_factor": 0.0,
-    "ending_equity": 50.0,
-    "return_percent": 0.0,
-    "max_drawdown": 0.0
+    "total_trades": 67,
+    "win_rate": 0.7014925373134329,
+    "profit_factor": 2.35,
+    "ending_equity": 117.5,
+    "return_percent": 135.0,
+    "max_drawdown": -42.5
   }
 }

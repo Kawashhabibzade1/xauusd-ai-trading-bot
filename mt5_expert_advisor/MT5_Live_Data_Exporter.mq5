@@ -3,6 +3,7 @@
 #property description "Exports recent XAUUSD bars with volume into MQL5/Files/xauusd_mt5_live.csv for the local Python research pipeline."
 
 input string ExportFile = "xauusd_mt5_live.csv";
+input string AccountSnapshotFile = "config\\mt5_account_snapshot.csv";
 input string ExpectedSymbol = "XAUUSD";
 input ENUM_TIMEFRAMES ExportTimeframe = PERIOD_M1;
 input int BarsToExport = 5000;
@@ -36,6 +37,62 @@ bool EnsureExpectedSymbol()
       g_symbol_warning_printed = true;
    }
    return false;
+}
+
+void ExportAccountSnapshot()
+{
+   FolderCreate("config");
+
+   int handle = FileOpen(AccountSnapshotFile, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(handle == INVALID_HANDLE)
+   {
+      Print("Exporter: Account snapshot FileOpen failed for ", AccountSnapshotFile, " error=", GetLastError());
+      return;
+   }
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   long login = AccountInfoInteger(ACCOUNT_LOGIN);
+   long leverage = AccountInfoInteger(ACCOUNT_LEVERAGE);
+   string server = AccountInfoString(ACCOUNT_SERVER);
+   string currency = AccountInfoString(ACCOUNT_CURRENCY);
+   double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   double volume_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double volume_max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double volume_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   FileWrite(
+      handle,
+      "time_utc",
+      "symbol",
+      "login",
+      "server",
+      "currency",
+      "balance",
+      "equity",
+      "leverage",
+      "contract_size",
+      "volume_min",
+      "volume_max",
+      "volume_step"
+   );
+   FileWrite(
+      handle,
+      TimeToString(TimeGMT(), TIME_DATE | TIME_SECONDS),
+      _Symbol,
+      (string)login,
+      server,
+      currency,
+      DoubleToString(balance, 2),
+      DoubleToString(equity, 2),
+      (string)leverage,
+      DoubleToString(contract_size, 2),
+      DoubleToString(volume_min, 2),
+      DoubleToString(volume_max, 2),
+      DoubleToString(volume_step, 2)
+   );
+
+   FileClose(handle);
 }
 
 void ExportBars()
@@ -80,6 +137,7 @@ void ExportBars()
    }
 
    FileClose(handle);
+   ExportAccountSnapshot();
    g_last_exported_bar = rates[copied - 1].time;
    g_last_export_wallclock = TimeCurrent();
    g_last_exported_close = rates[copied - 1].close;

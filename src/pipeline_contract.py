@@ -99,6 +99,7 @@ DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT = "data/live/research_mt5/xauusd_trade
 DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT = "data/live/research_mt5/xauusd_final_trade_ledger.csv"
 DEFAULT_MT5_RESEARCH_SNAPSHOT_DIR = "data/live/research_mt5/run_snapshots"
 DEFAULT_MT5_TRADE_DIRECTIVE_OUTPUT = "mt5_expert_advisor/Files/config/mt5_trade_directive.csv"
+DEFAULT_MT5_ACCOUNT_SNAPSHOT_OUTPUT = "mt5_expert_advisor/Files/config/mt5_account_snapshot.csv"
 DEFAULT_RESEARCH_BASELINE_DIR = "python_training/models/research/baseline"
 DEFAULT_RESEARCH_NEURAL_DIR = "python_training/models/research/patchtst"
 DEFAULT_RESEARCH_ENSEMBLE_DIR = "python_training/models/research/ensemble"

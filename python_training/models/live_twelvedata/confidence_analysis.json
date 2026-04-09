@@ -1,91 +1,82 @@
 {
-  "test_samples": 46,
+  "test_samples": 94,
   "threshold_results": [
     {
       "threshold": 0.4,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 91,
+      "accuracy": 0.5054945054945055,
+      "pct_total": 96.80851063829788,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 0.9787234042553191
     },
     {
       "threshold": 0.45,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 77,
+      "accuracy": 0.5454545454545454,
+      "pct_total": 81.91489361702128,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.5,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 73,
+      "accuracy": 0.547945205479452,
+      "pct_total": 77.6595744680851,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.55,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 67,
+      "accuracy": 0.5373134328358209,
+      "pct_total": 71.27659574468085,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.6,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 60,
+      "accuracy": 0.5,
+      "pct_total": 63.829787234042556,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.65,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 41,
+      "accuracy": 0.5609756097560976,
+      "pct_total": 43.61702127659575,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.7,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
+      "samples": 16,
+      "accuracy": 0.8125,
+      "pct_total": 17.02127659574468,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     },
     {
       "threshold": 0.75,
-      "samples": 46,
+      "samples": 1,
       "accuracy": 1.0,
-      "pct_total": 100.0,
+      "pct_total": 1.0638297872340425,
       "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
-    },
-    {
-      "threshold": 0.8,
-      "samples": 46,
-      "accuracy": 1.0,
-      "pct_total": 100.0,
-      "short_acc": 0.0,
-      "hold_acc": 1.0,
-      "long_acc": 0.0
+      "hold_acc": 0.0,
+      "long_acc": 1.0
     }
   ],
-  "selected_threshold": 0.4,
-  "selected_accuracy": 1.0,
-  "selected_retained_pct": 100.0,
+  "selected_threshold": 0.7,
+  "selected_accuracy": 0.8125,
+  "selected_retained_pct": 17.02127659574468,
   "selection_reason": "target_met",
-  "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         0\n        HOLD      1.000     1.000     1.000        46\n        LONG      0.000     0.000     0.000         0\n\n    accuracy                          1.000        46\n   macro avg      0.333     0.333     0.333        46\nweighted avg      1.000     1.000     1.000        46\n"
+  "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         3\n        HOLD      0.000     0.000     0.000         0\n        LONG      0.812     1.000     0.897        13\n\n    accuracy                          0.812        16\n   macro avg      0.271     0.333     0.299        16\nweighted avg      0.660     0.812     0.728        16\n"
 }

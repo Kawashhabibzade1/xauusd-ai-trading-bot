@@ -4,7 +4,7 @@
     "type": "LightGBM",
     "num_features": 68,
     "num_classes": 3,
-    "num_trees": 345,
+    "num_trees": 60,
     "validation_mode": "validation_first"
   },
   "trading_config": {

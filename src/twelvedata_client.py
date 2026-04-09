@@ -5,43 +5,18 @@ Minimal Twelve Data client helpers for the local dashboard.
 from __future__ import annotations
 
 import json
-import os
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
 
+from env_utils import resolve_env_value
 from pipeline_contract import display_path, ensure_parent_dir, resolve_repo_path
 
 
 DEFAULT_TWELVEDATA_ENV = "TWELVEDATA_API_KEY"
 BASE_URL = "https://api.twelvedata.com/time_series"
-DEFAULT_ENV_FILES = (".env", ".env.local")
-
-
-def resolve_env_value(env_name: str) -> str | None:
-    value = os.getenv(env_name, "").strip()
-    if value:
-        return value
-
-    for env_file in DEFAULT_ENV_FILES:
-        path = resolve_repo_path(env_file)
-        if not path.exists():
-            continue
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, file_value = line.split("=", 1)
-            if key.strip() != env_name:
-                continue
-            cleaned = file_value.strip().strip("'").strip('"')
-            return cleaned or None
-
-    return None
-
-
 def resolve_api_key(env_name: str = DEFAULT_TWELVEDATA_ENV) -> str | None:
     return resolve_env_value(env_name)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,7 +21,16 @@ import pandas as pd
 import yaml
 
 from filter_overlap import annotate_hunt_windows
-from mt5_client import normalize_mt5_symbol, sync_mt5_file_artifacts
+from mt5_client import (
+    fetch_mt5_account_context,
+    load_mt5_account_snapshot,
+    normalize_mt5_symbol,
+    resolve_login,
+    resolve_password,
+    resolve_server,
+    resolve_terminal_path,
+    sync_mt5_file_artifacts,
+)
 from pipeline_contract import (
     DEFAULT_MT5_LIVE_FEATURE_OUTPUT,
     DEFAULT_MT5_LIVE_MT5_VALIDATION_OUTPUT,
@@ -50,6 +60,49 @@ from run_live_mt5_pipeline import run_live_pipeline
 SIGNAL_NAME_MAP = {-1: "SHORT", 0: "HOLD", 1: "LONG"}
 SETUP_NAME_MAP = {-1: "SHORT_SETUP", 0: "NO_TRADE", 1: "LONG_SETUP"}
 OVERRIDEABLE_RISK_BLOCKERS = {"DAILY_TRADE_LIMIT", "DAILY_LOSS_LIMIT"}
+MT5_FILES_ROOT = Path.home() / "Library" / "Application Support" / "net.metaquotes.wine.metatrader5" / "drive_c" / "Program Files" / "MetaTrader 5" / "MQL5" / "Files"
+MT5_EXPORTER_LIVE_PATH = MT5_FILES_ROOT / "xauusd_mt5_live.csv"
+MT5_BOT_TRADE_LOG_PATH = MT5_FILES_ROOT / "logs" / "xauusd_ai_trades.csv"
+MT5_ACCOUNT_SNAPSHOT_PATH = MT5_FILES_ROOT / "config" / "mt5_account_snapshot.csv"
+
+
+def build_mt5_runtime_health() -> dict[str, Any]:
+    now_ts = time.time()
+
+    def inspect(path: Path, stale_after_seconds: int) -> dict[str, Any]:
+        if not path.exists():
+            return {
+                "path": str(path),
+                "exists": False,
+                "updated_at": "",
+                "age_seconds": None,
+                "stale": True,
+                "status": "missing",
+            }
+        mtime = path.stat().st_mtime
+        age_seconds = max(0, int(now_ts - mtime))
+        return {
+            "path": str(path),
+            "exists": True,
+            "updated_at": pd.Timestamp.fromtimestamp(mtime, tz="UTC").strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "age_seconds": age_seconds,
+            "stale": age_seconds > stale_after_seconds,
+            "status": "stale" if age_seconds > stale_after_seconds else "live",
+        }
+
+    exporter = inspect(MT5_EXPORTER_LIVE_PATH, stale_after_seconds=30)
+    trade_log = inspect(MT5_BOT_TRADE_LOG_PATH, stale_after_seconds=180)
+    account_snapshot = inspect(MT5_ACCOUNT_SNAPSHOT_PATH, stale_after_seconds=30)
+    return {
+        "exporter": exporter,
+        "bot_trade_log": trade_log,
+        "account_snapshot": account_snapshot,
+        "summary": {
+            "exporter_live": exporter["status"] == "live",
+            "bot_log_live": trade_log["status"] == "live",
+            "account_snapshot_live": account_snapshot["status"] == "live",
+        },
+    }
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -90,6 +143,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def load_config(path_like: str) -> dict[str, Any]:
     with resolve_repo_path(path_like).open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def load_live_account_context(
+    *,
+    symbol: str,
+    terminal_env: str,
+    login_env: str,
+    password_env: str,
+    server_env: str,
+) -> dict[str, Any] | None:
+    try:
+        context = fetch_mt5_account_context(
+            symbol=symbol,
+            terminal_path=resolve_terminal_path(terminal_env),
+            login=resolve_login(login_env),
+            password=resolve_password(password_env),
+            server=resolve_server(server_env),
+        )
+    except Exception:
+        context = None
+
+    if context is None:
+        try:
+            context = load_mt5_account_snapshot()
+        except Exception:
+            return None
+
+    if float(context.get("balance", 0.0) or 0.0) <= 0.0:
+        return None
+    return context
 
 
 def drop_latest_live_bar(
@@ -145,6 +228,13 @@ def directional_signal(short_prob: float, hold_prob: float, long_prob: float, th
 
 def join_reasons(*parts: str) -> str:
     return "|".join(part for part in parts if part)
+
+
+def split_reasons(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [part for part in text.split("|") if part]
 
 
 def load_manual_override(path_like: str) -> dict[str, Any]:
@@ -474,6 +564,8 @@ def simulate_paper_trades(
     config: dict[str, Any],
     manual_override: dict[str, Any] | None = None,
     source_timezone: str = "UTC",
+    starting_equity_override: float | None = None,
+    contract_size_override: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
     paper_cfg = config["trading"]["paper"]
     hunt_timezone = str(config.get("trading", {}).get("hunt_timezone", "UTC"))
@@ -484,9 +576,9 @@ def simulate_paper_trades(
     raw = raw_frame.copy().sort_values("time").reset_index(drop=True)
     raw["time"] = pd.to_datetime(raw["time"])
 
-    equity = float(paper_cfg["starting_equity"])
+    equity = float(starting_equity_override if starting_equity_override and starting_equity_override > 0.0 else paper_cfg["starting_equity"])
     risk_per_trade = float(paper_cfg["risk_per_trade"])
-    contract_size = float(paper_cfg.get("contract_size", 100.0) or 100.0)
+    contract_size = float(contract_size_override if contract_size_override and contract_size_override > 0.0 else (paper_cfg.get("contract_size", 100.0) or 100.0))
     max_holding_bars = int(paper_cfg["max_holding_bars"])
     max_trades_per_day = int(paper_cfg["max_trades_per_day"])
     daily_loss_stop = int(paper_cfg["daily_loss_streak_stop"])
@@ -499,6 +591,12 @@ def simulate_paper_trades(
     equity_curve: list[dict[str, Any]] = []
     open_trade_summary: dict[str, Any] | None = None
     trade_id = 0
+    starting_balance_snapshot = float(equity)
+    working["paper_risk_cash"] = 0.0
+    working["paper_volume_lots"] = 0.0
+    working["paper_account_balance"] = float(starting_balance_snapshot)
+    working["position_sizing_mode"] = "equity_risk"
+    working["assumed_contract_size"] = float(contract_size)
     ledger_columns = [
         "trade_id",
         "signal_time",
@@ -555,6 +653,11 @@ def simulate_paper_trades(
             continue
         risk_cash = equity * risk_per_trade
         volume_lots = estimate_position_volume_lots(risk_cash, stop_distance, contract_size)
+        working.at[index, "paper_account_balance"] = float(equity)
+        working.at[index, "paper_risk_cash"] = float(risk_cash)
+        working.at[index, "paper_volume_lots"] = float(volume_lots) if pd.notna(volume_lots) else 0.0
+        working.at[index, "position_sizing_mode"] = "equity_risk"
+        working.at[index, "assumed_contract_size"] = float(contract_size)
 
         risk_blockers: list[str] = []
         if next_available_time is not None and signal_time <= next_available_time:
@@ -982,7 +1085,7 @@ def build_learning_status(feedback: pd.DataFrame, config: dict[str, Any]) -> dic
     }
 
 
-def build_trade_directive_frame(predictions: pd.DataFrame) -> pd.DataFrame:
+def build_trade_directive_frame(predictions: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
     columns = [
         "epoch_utc",
         "time_utc",
@@ -1002,35 +1105,125 @@ def build_trade_directive_frame(predictions: pd.DataFrame) -> pd.DataFrame:
         "execution_scope",
         "learning_source",
         "streamlit_scope",
+        "volume_lots",
+        "risk_cash",
+        "position_sizing_mode",
+        "account_balance_snapshot",
+        "assumed_contract_size",
     ]
     if predictions.empty:
         return pd.DataFrame(columns=columns)
+    trading_cfg = config.get("trading", {})
+    threshold = float(config.get("ensemble", {}).get("confidence_threshold", 0.46))
+    ignored_blockers = {"H60_NOT_CONFIRMED", "NEGATIVE_EV"}
+    latest_prediction_time = pd.to_datetime(predictions["time"], errors="coerce", utc=True).max()
+    directive_max_age_bars = int(trading_cfg.get("directive_max_age_bars", 2) or 2)
+    directive_bar_seconds = 60
+    now_utc = pd.Timestamp.now(tz="UTC")
+    directive_reference_time = latest_prediction_time if pd.notna(latest_prediction_time) and latest_prediction_time >= now_utc else now_utc
 
-    latest = predictions.iloc[-1]
-    signal_time = pd.to_datetime(latest.get("time"), errors="coerce", utc=True)
-    epoch_utc = int(signal_time.timestamp()) if pd.notna(signal_time) else 0
+    def build_directive_row(latest: pd.Series) -> dict[str, Any]:
+        signal_15m = int(latest.get("signal_15m", 0) or 0)
+        execution_reasons = [
+            reason
+            for reason in split_reasons(str(latest.get("reason_blocked", "")))
+            if reason not in ignored_blockers
+        ]
+        execution_trade = str(latest.get("recommended_trade", "")).strip().upper()
+        execution_gate_status = str(latest.get("gate_status", "")).strip().upper()
+        execution_paper_status = str(latest.get("paper_status", "")).strip().upper()
+        execution_reason_blocked = str(latest.get("paper_reason_blocked", "")).strip()
+
+        session_allowed = int(latest.get("session_allowed", 0) or 0) == 1
+        entry_quality_ok = float(latest.get("entry_quality", 0.0) or 0.0) >= float(trading_cfg.get("min_entry_quality", 0.0) or 0.0)
+        setup_score_ok = float(latest.get("setup_score", 0.0) or 0.0) >= float(trading_cfg.get("min_setup_score", 0.0) or 0.0)
+        confidence_ok = float(latest.get("directional_confidence", 0.0) or 0.0) >= threshold
+        if signal_15m != 0 and session_allowed and entry_quality_ok and setup_score_ok and confidence_ok and not execution_reasons:
+            execution_trade = "LONG" if signal_15m > 0 else "SHORT"
+            execution_gate_status = "READY"
+            execution_paper_status = "SIGNAL_READY"
+            execution_reason_blocked = ""
+
+        account_balance_snapshot = float(latest.get("paper_account_balance", 0.0) or 0.0)
+        assumed_contract_size = float(latest.get("assumed_contract_size", 0.0) or 0.0)
+        if assumed_contract_size <= 0.0:
+            assumed_contract_size = float(config.get("trading", {}).get("paper", {}).get("contract_size", 100.0) or 100.0)
+        risk_cash = float(latest.get("paper_risk_cash", 0.0) or 0.0)
+        if risk_cash <= 0.0 and account_balance_snapshot > 0.0:
+            risk_cash = account_balance_snapshot * float(config.get("trading", {}).get("paper", {}).get("risk_per_trade", 0.0) or 0.0)
+
+        entry_price = float(latest.get("entry_price", 0.0) or 0.0)
+        stop_loss = float(latest.get("stop_loss", 0.0) or 0.0)
+        tp1 = float(latest.get("tp1", 0.0) or 0.0)
+        tp2 = float(latest.get("tp2", 0.0) or 0.0)
+        stop_distance = abs(entry_price - stop_loss)
+        tp1_distance = abs(tp1 - entry_price)
+        tp2_distance = abs(tp2 - entry_price)
+        if execution_trade == "LONG":
+            stop_loss = entry_price - stop_distance
+            tp1 = entry_price + tp1_distance
+            tp2 = entry_price + tp2_distance
+        elif execution_trade == "SHORT":
+            stop_loss = entry_price + stop_distance
+            tp1 = entry_price - tp1_distance
+            tp2 = entry_price - tp2_distance
+
+        volume_lots = float(latest.get("paper_volume_lots", 0.0) or 0.0)
+        if volume_lots <= 0.0 and execution_gate_status == "READY" and execution_paper_status == "SIGNAL_READY":
+            volume_lots = estimate_position_volume_lots(risk_cash, stop_distance, assumed_contract_size)
+
+        signal_time = pd.to_datetime(latest.get("time"), errors="coerce", utc=True)
+        if pd.notna(signal_time) and pd.notna(directive_reference_time):
+            age_seconds = max(0.0, float((directive_reference_time - signal_time).total_seconds()))
+            if age_seconds > directive_max_age_bars * directive_bar_seconds:
+                execution_trade = "WATCH"
+                execution_gate_status = "BLOCKED"
+                execution_paper_status = "BLOCKED"
+                execution_reason_blocked = join_reasons(execution_reason_blocked, "STALE_DIRECTIVE")
+                volume_lots = 0.0
+                risk_cash = 0.0
+
+        epoch_utc = int(signal_time.timestamp()) if pd.notna(signal_time) else 0
+        return {
+            "epoch_utc": epoch_utc,
+            "time_utc": str(latest.get("time", "")),
+            "recommended_trade": execution_trade,
+            "gate_status": execution_gate_status,
+            "paper_status": execution_paper_status,
+            "paper_reason_blocked": execution_reason_blocked,
+            "directional_confidence": float(latest.get("directional_confidence", 0.0)),
+            "setup_score": float(latest.get("setup_score", 0.0)),
+            "expected_value": float(latest.get("expected_value", 0.0)),
+            "entry_price": float(entry_price),
+            "stop_loss": float(stop_loss),
+            "tp1": float(tp1),
+            "tp2": float(tp2),
+            "session_name": str(latest.get("session_name", "")),
+            "manual_override_used": bool(latest.get("manual_override_used", False)),
+            "execution_scope": "mirror_to_mt5_demo",
+            "learning_source": "paper_signal_with_mt5_execution",
+            "streamlit_scope": "paper_research_only",
+            "volume_lots": float(volume_lots or 0.0),
+            "risk_cash": float(risk_cash or 0.0),
+            "position_sizing_mode": str(latest.get("position_sizing_mode", "equity_risk")),
+            "account_balance_snapshot": float(account_balance_snapshot or 0.0),
+            "assumed_contract_size": float(assumed_contract_size or 0.0),
+        }
+
+    evaluated_rows = [build_directive_row(predictions.iloc[index]) for index in range(len(predictions))]
+    selected_row = next(
+        (
+            row
+            for row in reversed(evaluated_rows)
+            if row["recommended_trade"] in {"LONG", "SHORT"}
+            and row["gate_status"] == "READY"
+            and row["paper_status"] == "SIGNAL_READY"
+        ),
+        evaluated_rows[-1],
+    )
     return pd.DataFrame(
         [
-            {
-                "epoch_utc": epoch_utc,
-                "time_utc": str(latest.get("time", "")),
-                "recommended_trade": str(latest.get("recommended_trade", "")),
-                "gate_status": str(latest.get("gate_status", "")),
-                "paper_status": str(latest.get("paper_status", "")),
-                "paper_reason_blocked": str(latest.get("paper_reason_blocked", "")),
-                "directional_confidence": float(latest.get("directional_confidence", 0.0)),
-                "setup_score": float(latest.get("setup_score", 0.0)),
-                "expected_value": float(latest.get("expected_value", 0.0)),
-                "entry_price": float(latest.get("entry_price", 0.0)),
-                "stop_loss": float(latest.get("stop_loss", 0.0)),
-                "tp1": float(latest.get("tp1", 0.0)),
-                "tp2": float(latest.get("tp2", 0.0)),
-                "session_name": str(latest.get("session_name", "")),
-                "manual_override_used": bool(latest.get("manual_override_used", False)),
-                "execution_scope": "demo_only",
-                "learning_source": "paper_only",
-                "streamlit_scope": "paper_research_only",
-            }
+            selected_row
         ],
         columns=columns,
     )
@@ -1522,6 +1715,8 @@ def write_run_snapshot(
 
 def build_report(
     live_report: dict[str, Any],
+    live_account_context: dict[str, Any] | None,
+    mt5_runtime_health: dict[str, Any],
     predictions: pd.DataFrame,
     overlays: dict[str, Any],
     paper_ledger: pd.DataFrame,
@@ -1586,7 +1781,7 @@ def build_report(
         "notes": [
             "This cockpit is running on MT5 local live data from the desktop exporter on the same machine.",
             "5m and 60m layers are proxy confirmations derived from MT5 live feature state until the heavier multi-horizon MT5 research model is enabled.",
-            "Paper trading is simulated locally from recent MT5 bars. It does not place broker orders.",
+            "Paper trading is simulated locally from recent MT5 bars. The MT5 EA can mirror only READY directives from that same paper signal.",
             "Any MT5 broker execution is intentionally demo-only and stays separate from Streamlit metrics and learning feedback.",
             *list(live_report.get("notes", [])),
         ],
@@ -1611,6 +1806,17 @@ def build_report(
             "hunt_windows": list(live_report.get("hunt_windows", [])),
             "raw_output": live_report.get("artifacts", {}).get("raw_output", display_path(DEFAULT_MT5_LIVE_RAW_INPUT)),
         },
+        "mt5_account": {
+            "connected": bool(live_account_context),
+            "login": int((live_account_context or {}).get("login", 0) or 0),
+            "server": str((live_account_context or {}).get("server", "") or ""),
+            "currency": str((live_account_context or {}).get("currency", "") or ""),
+            "balance": float((live_account_context or {}).get("balance", 0.0) or 0.0),
+            "equity": float((live_account_context or {}).get("equity", 0.0) or 0.0),
+            "leverage": int((live_account_context or {}).get("leverage", 0) or 0),
+            "contract_size": float((live_account_context or {}).get("contract_size", 0.0) or 0.0),
+        },
+        "mt5_runtime_health": mt5_runtime_health,
         "prediction_window": {
             "start": prediction_window_start,
             "end": prediction_window_end,
@@ -1659,6 +1865,7 @@ def build_report(
             "streamlit_scope": "paper_research_only",
             "ingests_mt5_broker_trades": False,
             "requires_trade_directive": True,
+            "broker_mirror_trigger": "latest directive row with gate_status=READY and paper_status=SIGNAL_READY",
             "trade_directive_synced_targets": [],
             "trade_directive_sync_error": "",
         },
@@ -1693,6 +1900,29 @@ def build_report(
     return report
 
 
+def sync_paper_capital_to_mt5_account(report: dict[str, Any]) -> dict[str, Any]:
+    mt5_account = report.get("mt5_account", {}) or {}
+    if not mt5_account.get("connected"):
+        return report
+
+    balance = float(mt5_account.get("balance", 0.0) or 0.0)
+    equity = float(mt5_account.get("equity", balance) or balance)
+    if balance <= 0.0:
+        return report
+
+    for section_name in ("current_run_paper_trading", "paper_trading", "frozen_paper_trading", "backtest"):
+        section = report.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        section["mt5_balance"] = balance
+        section["mt5_equity"] = equity
+        section["capital_source"] = "mt5_account_equity"
+        section["display_starting_equity"] = balance
+        section["display_ending_equity"] = equity
+        section["display_net_pnl_cash"] = equity - balance
+    return report
+
+
 def write_outputs(
     predictions: pd.DataFrame,
     overlays: dict[str, Any],
@@ -1700,6 +1930,7 @@ def write_outputs(
     feedback: pd.DataFrame,
     learning_status: dict[str, Any],
     report: dict[str, Any],
+    config_payload: dict[str, Any],
     predictions_output: str,
     overlays_output: str,
     paper_output: str,
@@ -1715,7 +1946,8 @@ def write_outputs(
 ) -> None:
     predictions_to_write = predictions.copy()
     predictions_to_write["time"] = predictions_to_write["time"].astype(str)
-    predictions_to_write.to_csv(ensure_parent_dir(predictions_output), index=False)
+    predictions_output_path = ensure_parent_dir(predictions_output)
+    predictions_to_write.to_csv(predictions_output_path, index=False)
     json_dump(overlays, overlays_output)
     paper_ledger.to_csv(ensure_parent_dir(paper_output), index=False)
     trade_history = append_trade_history(
@@ -1741,7 +1973,8 @@ def write_outputs(
     report.setdefault("dataset_summary", {})["saved_history_rows"] = int(len(trade_history))
     report["dataset_summary"]["paper_trade_rows"] = int(len(final_trade_ledger))
     report["dataset_summary"]["current_run_paper_trade_rows"] = int(len(paper_ledger))
-    trade_directive = build_trade_directive_frame(predictions)
+    directive_source = pd.read_csv(predictions_output_path)
+    trade_directive = build_trade_directive_frame(directive_source, config_payload)
     write_csv_atomically(trade_directive, trade_directive_output, index=False)
     synced_directive_targets: list[str] = []
     sync_error = ""
@@ -1752,6 +1985,7 @@ def write_outputs(
     report.setdefault("outputs", {})["trade_directive_output"] = display_path(trade_directive_output)
     report.setdefault("execution_policy", {})["trade_directive_synced_targets"] = synced_directive_targets
     report.setdefault("execution_policy", {})["trade_directive_sync_error"] = sync_error
+    sync_paper_capital_to_mt5_account(report)
     feedback.to_csv(ensure_parent_dir(feedback_output), index=False)
     json_dump(learning_status, learning_status_output)
     json_dump(report, report_output)
@@ -1797,6 +2031,14 @@ def run_mt5_research_pipeline(
     skip_backtest: bool = False,
 ) -> dict[str, Any]:
     config_payload = load_config(config)
+    live_account_context = load_live_account_context(
+        symbol=symbol,
+        terminal_env=terminal_env,
+        login_env=login_env,
+        password_env=password_env,
+        server_env=server_env,
+    )
+    mt5_runtime_health = build_mt5_runtime_health()
     snapshot_timestamp = pd.Timestamp.now(tz="UTC")
     snapshot_created_at = snapshot_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
     snapshot_run_id = snapshot_timestamp.strftime("%Y%m%dT%H%M%S%fZ")
@@ -1838,12 +2080,16 @@ def run_mt5_research_pipeline(
         config_payload,
         manual_override,
         source_timezone=source_timezone,
+        starting_equity_override=(live_account_context or {}).get("balance"),
+        contract_size_override=(live_account_context or {}).get("contract_size"),
     )
     feedback = build_learning_feedback(predictions, paper_ledger)
     learning_status = build_learning_status(feedback, config_payload)
     json_dump(manual_override, manual_override_output)
     report = build_report(
         live_report=live_report,
+        live_account_context=live_account_context,
+        mt5_runtime_health=mt5_runtime_health,
         predictions=predictions,
         overlays=overlays,
         paper_ledger=paper_ledger,
@@ -1876,6 +2122,7 @@ def run_mt5_research_pipeline(
         feedback,
         learning_status,
         report,
+        config_payload,
         predictions_output,
         overlays_output,
         paper_output,
@@ -1934,7 +2181,9 @@ def print_research_summary(report: dict[str, Any]) -> None:
     print(f"Source      : {source['provider']} {source['symbol']} {source['start']} -> {source['end']}")
     print(f"Predictions : {dataset['prediction_rows']}")
     print(f"Paper trades: {paper['trade_count']}")
-    print(f"Capital     : {float(paper.get('ending_equity', 0.0)):.2f} ({float(paper.get('net_pnl_cash', 0.0)):+.2f})")
+    display_capital = float(paper.get("display_ending_equity", paper.get("ending_equity", 0.0)))
+    display_pnl = float(paper.get("display_net_pnl_cash", paper.get("net_pnl_cash", 0.0)))
+    print(f"Capital     : {display_capital:.2f} ({display_pnl:+.2f})")
     print(f"Win/Loss    : {int(paper.get('win_count', 0))}/{int(paper.get('loss_count', 0))}")
     print(f"Override    : {int(override.get('remaining_credits', 0))} credits remaining")
     print(f"Learning    : {'READY' if report['learning']['retrain_ready'] else 'NOT_READY'} ({', '.join(report['learning']['retrain_blockers']) or 'all checks passed'})")

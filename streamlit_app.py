@@ -20,6 +20,7 @@ from pipeline_contract import (
     resolve_repo_path,
 )
 from research_streamlit_data import (
+    build_broker_trade_log_table,
     build_blocked_signal_table,
     build_calibration_figure,
     build_candlestick_figure,
@@ -342,6 +343,8 @@ def build_execution_policy_note(report: dict) -> str:
     policy = report.get("execution_policy", {})
     if not policy:
         return ""
+    latest = report.get("latest_signal", {})
+    runtime_health = report.get("mt5_runtime_health", {})
     broker_mode = str(policy.get("broker_execution_mode", "unknown")).replace("_", " ")
     setup_source = str(policy.get("trade_setup_source", "unknown")).replace("_", " ")
     learning_source = str(policy.get("learning_source", "unknown")).replace("_", " ")
@@ -358,12 +361,18 @@ def build_execution_policy_note(report: dict) -> str:
             directive_sync = "pending"
     else:
         directive_sync = "not required"
+    latest_gate = str(latest.get("gate_status", "unknown") or "unknown")
+    latest_paper = str(latest.get("paper_status", "unknown") or "unknown")
+    latest_trade_state = "tradeable" if latest_gate == "READY" and latest_paper == "SIGNAL_READY" else "blocked"
+    bot_log_state = str((runtime_health.get("bot_trade_log", {}) or {}).get("status", "unknown"))
     return (
         f"Broker execution: {broker_mode} | "
         f"trade setup source: {setup_source} | "
         f"learning source: {learning_source} | "
         f"Streamlit scope: {streamlit_scope} | "
-        f"trade directive sync: {directive_sync}"
+        f"directive file sync: {directive_sync} | "
+        f"latest signal: {latest_trade_state} ({latest_gate}/{latest_paper}) | "
+        f"bot log: {bot_log_state}"
     )
 
 
@@ -389,14 +398,14 @@ def cached_mt5_timeframe_ribbon(mt5_symbol: str, enabled: bool, refresh_key: int
 def build_refresh_key(settings: dict[str, object]) -> int:
     if not bool(settings.get("auto_refresh_enabled", False)):
         return 0
-    interval = max(5, int(settings.get("auto_refresh_seconds", 15)))
+    interval = max(1, int(settings.get("auto_refresh_seconds", 15)))
     return int(time.time() // interval)
 
 
 def get_auto_refresh_run_every(settings: dict[str, object]) -> str | None:
     if not bool(settings.get("auto_refresh_enabled", False)):
         return None
-    interval = max(5, int(settings.get("auto_refresh_seconds", 15)))
+    interval = max(1, int(settings.get("auto_refresh_seconds", 15)))
     return f"{interval}s"
 
 
@@ -425,7 +434,7 @@ def resolve_active_report_path(report_source: str, live_provider: str, custom_pa
 
 def sidebar_state() -> dict[str, object]:
     st.sidebar.markdown("## Research Control")
-    live_provider = st.sidebar.selectbox("Live provider", options=["Auto", "MT5 Local", "MT5 Exporter", "OANDA", "Twelve Data"], index=0)
+    live_provider = st.sidebar.selectbox("Live provider", options=["Auto", "MT5 Local", "MT5 Exporter"], index=0)
     report_source = st.sidebar.selectbox(
         "Report source",
         options=["Auto", "MT5 Live Paper", "Research Baseline", "Custom"],
@@ -443,21 +452,16 @@ def sidebar_state() -> dict[str, object]:
     chart_bars = st.sidebar.slider("Chart bars", min_value=120, max_value=720, value=240, step=20)
     probability_bars = st.sidebar.slider("Probability bars", min_value=60, max_value=600, value=180, step=20)
     live_enabled = st.sidebar.toggle("Load live market snapshot", value=True)
-    if live_provider in {"MT5 Local", "MT5 Exporter"}:
-        default_symbol = "XAUUSD"
-    elif live_provider == "OANDA":
-        default_symbol = "XAU_USD"
-    else:
-        default_symbol = "XAU/USD"
+    default_symbol = "XAUUSD"
     live_symbol = st.sidebar.text_input("Live symbol / instrument", value=default_symbol, key=f"live_symbol_{live_provider.lower().replace(' ', '_')}")
     live_window = st.sidebar.slider("Live snapshot bars", min_value=20, max_value=240, value=120, step=20)
     auto_refresh_enabled = st.sidebar.toggle("Auto refresh live UI", value=True)
     auto_refresh_seconds = st.sidebar.slider(
         "Refresh every (sec)",
-        min_value=5,
+        min_value=1,
         max_value=120,
-        value=5,
-        step=5,
+        value=1,
+        step=1,
         disabled=not auto_refresh_enabled,
     )
     if st.sidebar.button("Refresh cached data"):
@@ -469,15 +473,12 @@ def sidebar_state() -> dict[str, object]:
         "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto\n"
         "python src/run_mt5_research_worker.py --poll-seconds 15"
         if live_provider in {"MT5 Local", "MT5 Exporter"}
-        else
-        "python src/run_live_oanda_pipeline.py"
-        if live_provider == "OANDA"
-        else "python src/run_live_twelvedata_pipeline.py"
+        else "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto"
     )
     st.sidebar.code(
         live_command
         if live_provider != "Auto"
-        else "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto\npython src/run_live_oanda_pipeline.py\npython src/run_live_twelvedata_pipeline.py",
+        else "python src/mt5_keychain_cli.py run-research-pipeline -- --source-mode auto",
         language="bash",
     )
     st.sidebar.caption(
@@ -517,6 +518,7 @@ def load_page_state(settings: dict[str, object]) -> tuple[dict, pd.DataFrame, pd
     paper_ledger = bundle["paper_ledger"]
     trade_history = bundle.get("trade_history", pd.DataFrame())
     final_trade_ledger = bundle.get("final_trade_ledger", pd.DataFrame())
+    broker_trade_log = bundle.get("broker_trade_log", pd.DataFrame())
     report = bundle["report"]
     overlays = bundle["overlays"]
     live_snapshot = cached_live_snapshot(
@@ -528,7 +530,7 @@ def load_page_state(settings: dict[str, object]) -> tuple[dict, pd.DataFrame, pd
         refresh_key=refresh_key,
     )
     mt5_ribbon = cached_mt5_timeframe_ribbon(str(settings["mt5_symbol"]), bool(settings["live_enabled"]), refresh_key=refresh_key)
-    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot, "_mt5_m30_ribbon": mt5_ribbon, "_trade_history": trade_history, "_final_trade_ledger": final_trade_ledger}
+    return settings, predictions, paper_ledger, report, overlays | {"_live_snapshot": live_snapshot, "_mt5_m30_ribbon": mt5_ribbon, "_trade_history": trade_history, "_final_trade_ledger": final_trade_ledger, "_broker_trade_log": broker_trade_log}
 
 
 def render_m30_ribbon_card(ribbon: dict) -> None:
@@ -563,6 +565,8 @@ def render_header(report: dict) -> None:
     dataset_summary = report.get("dataset_summary", {})
     notes = report.get("notes", [])
     mt5_live_source = report.get("mt5_live_source", {})
+    mt5_account = report.get("mt5_account", {})
+    runtime_health = report.get("mt5_runtime_health", {})
     st.markdown(
         """
         <div class="cockpit-hero">
@@ -586,6 +590,32 @@ def render_header(report: dict) -> None:
             f"| {mt5_live_source.get('start', 'n/a')} -> {mt5_live_source.get('end', 'n/a')}"
         )
         st.caption(build_overlap_window_note(report))
+    if not bool(mt5_account.get("connected", False)):
+        st.error(
+            "MT5 account sync is offline. Balance/equity are not coming from MT5 right now, "
+            "so any paper capital numbers below are simulation-only and must not be treated as broker truth."
+        )
+    exporter = runtime_health.get("exporter", {})
+    bot_log = runtime_health.get("bot_trade_log", {})
+    account_snapshot = runtime_health.get("account_snapshot", {})
+    if exporter or bot_log or account_snapshot:
+        st.caption(
+            "MT5 runtime health: "
+            f"exporter={exporter.get('status', 'unknown')} "
+            f"| bot_log={bot_log.get('status', 'unknown')} "
+            f"| account_snapshot={account_snapshot.get('status', 'unknown')}"
+        )
+    if bool(mt5_account.get("connected", False)) and str(bot_log.get("status", "unknown")) != "live":
+        st.warning(
+            "MT5 account sync is live, but the EA trade log is stale. "
+            "Balance/equity are coming from MT5, but broker-side auto-trade execution is not confirming fresh decisions yet."
+        )
+    latest_signal = report.get("latest_signal", {})
+    if str(latest_signal.get("gate_status", "")) != "READY" or str(latest_signal.get("paper_status", "")) != "SIGNAL_READY":
+        st.info(
+            "The latest paper signal is currently blocked, so no MT5 order should be expected from this report yet. "
+            f"State: {latest_signal.get('gate_status', 'unknown')} / {latest_signal.get('paper_status', 'unknown')}."
+        )
     execution_policy_note = build_execution_policy_note(report)
     if execution_policy_note:
         st.caption(execution_policy_note)
@@ -603,6 +633,7 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     live_snapshot = overlay_bundle["_live_snapshot"]
     mt5_ribbon = overlay_bundle["_mt5_m30_ribbon"]
     final_trade_ledger = overlay_bundle.get("_final_trade_ledger", pd.DataFrame())
+    broker_trade_log = overlay_bundle.get("_broker_trade_log", pd.DataFrame())
     latest = report.get("latest_signal", {})
     learning = report.get("learning", {})
     manual_override = report.get("manual_override", {})
@@ -626,6 +657,8 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
     risk_cols = st.columns(5)
     paper_summary = report.get("paper_trading", report.get("current_run_paper_trading", {}))
     current_run_summary = report.get("current_run_paper_trading", {})
+    mt5_account = report.get("mt5_account", {})
+    account_synced = bool(mt5_account.get("connected", False))
     with risk_cols[0]:
         render_metric_card("Paper Trades", str(paper_summary.get("trade_count", 0)), "Closed trades")
     with risk_cols[1]:
@@ -639,25 +672,49 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         render_metric_card("Learning Gate", str(len(blockers)), "all checks passed" if not blockers else "|".join(blockers))
 
     capital_cols = st.columns(5)
-    starting_equity = float(paper_summary.get("starting_equity", 0.0))
-    ending_equity = float(paper_summary.get("ending_equity", starting_equity))
-    net_pnl_cash = float(paper_summary.get("net_pnl_cash", ending_equity - starting_equity))
+    starting_equity = float(paper_summary.get("display_starting_equity", paper_summary.get("starting_equity", 0.0)))
+    ending_equity = float(paper_summary.get("display_ending_equity", paper_summary.get("ending_equity", starting_equity)))
+    net_pnl_cash = float(paper_summary.get("display_net_pnl_cash", paper_summary.get("net_pnl_cash", ending_equity - starting_equity)))
     risk_per_trade = float(paper_summary.get("risk_per_trade", 0.0))
     risk_cash = ending_equity * risk_per_trade
     sizing_mode = str(paper_summary.get("position_sizing_mode", "") or "equity_risk")
     with capital_cols[0]:
-        render_metric_card("Capital", f"{ending_equity:.2f}", f"start {starting_equity:.2f}")
+        capital_note = (
+            "live MT5 equity"
+            if paper_summary.get("capital_source") == "mt5_account_equity"
+            else "MT5 snapshot missing; hidden to avoid fake broker balance"
+        )
+        render_metric_card("Capital", f"{ending_equity:.2f}" if account_synced else "N/A", capital_note)
     with capital_cols[1]:
-        render_metric_card("Risk / Trade", f"{risk_cash:.2f}", f"{risk_per_trade:.2%} of current capital | {sizing_mode}")
+        risk_note = (
+            f"{risk_per_trade:.2%} of current capital | {sizing_mode}"
+            if account_synced
+            else "waiting for MT5 balance/equity snapshot"
+        )
+        render_metric_card("Risk / Trade", f"{risk_cash:.2f}" if account_synced else "N/A", risk_note)
     with capital_cols[2]:
-        render_metric_card("Net PnL", f"{net_pnl_cash:+.2f}", "paper equity delta")
+        pnl_note = (
+            "floating PnL from MT5 equity - balance"
+            if paper_summary.get("capital_source") == "mt5_account_equity"
+            else "hidden until MT5 account sync is live"
+        )
+        render_metric_card("Net PnL", f"{net_pnl_cash:+.2f}" if account_synced else "N/A", pnl_note)
     with capital_cols[3]:
-        render_metric_card("Wins", str(int(paper_summary.get("win_count", 0))), "closed winners")
+        render_metric_card("Paper Wins", str(int(paper_summary.get("win_count", 0))), "simulated closed winners")
     with capital_cols[4]:
-        render_metric_card("Losses", str(int(paper_summary.get("loss_count", 0))), "closed losers")
+        render_metric_card("Paper Losses", str(int(paper_summary.get("loss_count", 0))), "simulated closed losers")
 
     frozen_summary = report.get("frozen_paper_trading", {})
     current_run_trade_count = int(current_run_summary.get("trade_count", 0))
+    broker_table = build_broker_trade_log_table(broker_trade_log, limit=20)
+    broker_events = broker_trade_log.copy() if not broker_trade_log.empty else pd.DataFrame()
+    if not broker_events.empty and "action" in broker_events.columns:
+        broker_events = broker_events.loc[
+            broker_events["action"].astype(str).isin(["OPEN", "BREAKEVEN", "OPEN_REJECT", "BREAKEVEN_REJECT", "CLOSE"])
+        ].copy()
+    broker_open_events = broker_events.loc[broker_events["action"].astype(str) == "OPEN"].copy() if not broker_events.empty else pd.DataFrame()
+    broker_open_rejects = broker_events.loc[broker_events["action"].astype(str) == "OPEN_REJECT"].copy() if not broker_events.empty else pd.DataFrame()
+    latest_broker_event = broker_events.iloc[-1] if not broker_events.empty else None
     if frozen_summary:
         st.caption(
             "Paper cards above now use the saved closed-trade history across runs. "
@@ -667,9 +724,69 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         with frozen_cols[0]:
             render_metric_card("Frozen Trades", str(int(frozen_summary.get("trade_count", 0))), "saved closed trades")
         with frozen_cols[1]:
-            render_metric_card("Frozen Capital", f"{float(frozen_summary.get('ending_equity', frozen_summary.get('starting_equity', 0.0))):.2f}", f"start {float(frozen_summary.get('starting_equity', 0.0)):.2f}")
+            frozen_capital = float(frozen_summary.get("display_ending_equity", frozen_summary.get("ending_equity", frozen_summary.get("starting_equity", 0.0))))
+            frozen_start = float(frozen_summary.get("display_starting_equity", frozen_summary.get("starting_equity", 0.0)))
+            frozen_note = (
+                "live MT5 equity"
+                if frozen_summary.get("capital_source") == "mt5_account_equity"
+                else "MT5 snapshot missing; hidden to avoid fake broker balance"
+            )
+            render_metric_card("Frozen Capital", f"{frozen_capital:.2f}" if account_synced else "N/A", frozen_note)
         with frozen_cols[2]:
-            render_metric_card("Frozen Net PnL", f"{float(frozen_summary.get('net_pnl_cash', 0.0)):+.2f}", "saved closed-trade history")
+            frozen_pnl = float(frozen_summary.get("display_net_pnl_cash", frozen_summary.get("net_pnl_cash", 0.0)))
+            frozen_pnl_note = (
+                "floating PnL from MT5 equity - balance"
+                if frozen_summary.get("capital_source") == "mt5_account_equity"
+                else "hidden until MT5 account sync is live"
+            )
+            render_metric_card("Frozen Net PnL", f"{frozen_pnl:+.2f}" if account_synced else "N/A", frozen_pnl_note)
+
+    mt5_account = report.get("mt5_account", {}) or {}
+    mt5_balance = float(mt5_account.get("balance", 0.0) or 0.0)
+    mt5_equity = float(mt5_account.get("equity", 0.0) or 0.0)
+    floating_delta = mt5_equity - mt5_balance
+    mt5_position_state = "Flat"
+    mt5_position_note = "equity matches balance"
+    if abs(floating_delta) > 0.01:
+        mt5_position_state = "Open Position"
+        mt5_position_note = f"floating PnL {floating_delta:+.2f}"
+
+    mt5_cols = st.columns(4)
+    with mt5_cols[0]:
+        render_metric_card(
+            "MT5 Position",
+            mt5_position_state,
+            mt5_position_note,
+        )
+    with mt5_cols[1]:
+        render_metric_card(
+            "MT5 Executions",
+            str(int(len(broker_open_events))),
+            f"{int(len(broker_open_rejects))} rejected submits",
+        )
+    with mt5_cols[2]:
+        render_metric_card(
+            "Last MT5 Log Event",
+            str(latest_broker_event["action"]) if latest_broker_event is not None and "action" in latest_broker_event else "N/A",
+            str(latest_broker_event["time_utc"]) if latest_broker_event is not None and "time_utc" in latest_broker_event else "no broker events yet",
+        )
+    with mt5_cols[3]:
+        render_metric_card(
+            "Last MT5 Direction",
+            str(latest_broker_event["direction"]) if latest_broker_event is not None and "direction" in latest_broker_event else "N/A",
+            str(latest_broker_event["retcode_desc"]) if latest_broker_event is not None and "retcode_desc" in latest_broker_event else "",
+        )
+    render_metric_card(
+        "Last MT5 Entry",
+        f"{float(latest_broker_event['entry_price']):.2f}" if latest_broker_event is not None and "entry_price" in latest_broker_event and pd.notna(latest_broker_event["entry_price"]) else "N/A",
+        str(latest_broker_event["note"]) if latest_broker_event is not None and "note" in latest_broker_event else "",
+    )
+
+    st.subheader("MT5 Applied Trades")
+    if broker_table.empty:
+        st.info("No MT5 broker execution log rows are available yet.")
+    else:
+        st.dataframe(broker_table, width="stretch", hide_index=True)
 
     saved_summary = build_trade_period_summary_table(final_trade_ledger)
     if not saved_summary.empty:
@@ -751,11 +868,14 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
             st.dataframe(blocked_table, width="stretch", hide_index=True)
 
     st.subheader("Latest Paper Trades")
+    if not account_synced:
+        st.warning("These rows are simulated paper trades. `paper_equity_before` and `paper_equity_after` are not MT5 account values.")
     paper_table = build_paper_ledger_table(paper_ledger, limit=12)
     if paper_table.empty:
         st.info("No paper trades are closed yet in the current report.")
     else:
         st.dataframe(paper_table, width="stretch", hide_index=True)
+
 
 
 def render_chart_structure_page(settings: dict[str, object]) -> None:
@@ -937,9 +1057,14 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
         with frozen_metric_cols[0]:
             render_metric_card("Frozen Trades", str(int(frozen_summary.get("trade_count", 0))), "saved closed trades")
         with frozen_metric_cols[1]:
-            render_metric_card("Frozen Capital", f"{float(frozen_summary.get('ending_equity', frozen_summary.get('starting_equity', 0.0))):.2f}", f"start {float(frozen_summary.get('starting_equity', 0.0)):.2f}")
+            frozen_capital = float(frozen_summary.get("display_ending_equity", frozen_summary.get("ending_equity", frozen_summary.get("starting_equity", 0.0))))
+            frozen_start = float(frozen_summary.get("display_starting_equity", frozen_summary.get("starting_equity", 0.0)))
+            frozen_note = "synced from MT5 balance" if frozen_summary.get("capital_source") == "mt5_account_balance" else f"start {frozen_start:.2f}"
+            render_metric_card("Frozen Capital", f"{frozen_capital:.2f}", frozen_note)
         with frozen_metric_cols[2]:
-            render_metric_card("Frozen Net PnL", f"{float(frozen_summary.get('net_pnl_cash', 0.0)):+.2f}", "saved closed-trade history")
+            frozen_pnl = float(frozen_summary.get("display_net_pnl_cash", frozen_summary.get("net_pnl_cash", 0.0)))
+            frozen_pnl_note = "aligned to MT5 account" if frozen_summary.get("capital_source") == "mt5_account_balance" else "saved closed-trade history"
+            render_metric_card("Frozen Net PnL", f"{frozen_pnl:+.2f}", frozen_pnl_note)
 
     st.plotly_chart(build_equity_curve_figure(report), width="stretch")
 
@@ -959,6 +1084,9 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
         st.dataframe(period_summary, width="stretch", hide_index=True)
 
     st.markdown("#### Current Report Closed Paper Trades")
+    mt5_account = report.get("mt5_account", {})
+    if not bool(mt5_account.get("connected", False)):
+        st.warning("This table is simulation-only. `paper_equity_before` and `paper_equity_after` are not broker balance/equity.")
     paper_table = build_paper_ledger_table(paper_ledger, limit=25)
     if paper_table.empty:
         st.info("No closed paper trades are present in the current report window.")
@@ -966,6 +1094,8 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
         st.dataframe(paper_table, width="stretch", hide_index=True)
 
     st.markdown("#### Frozen Final Closed Trades")
+    if not bool(mt5_account.get("connected", False)):
+        st.warning("Frozen trade history still contains simulated paper equity columns until MT5 account sync becomes available.")
     saved_trade_table = build_saved_trade_history_table(final_trade_ledger, limit=200)
     if saved_trade_table.empty:
         st.info("No frozen final trade rows are available yet.")

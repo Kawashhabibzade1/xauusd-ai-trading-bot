@@ -10,8 +10,8 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
+from env_utils import resolve_env_value
 from pipeline_contract import display_path, ensure_parent_dir
-from twelvedata_client import resolve_env_value
 
 
 DEFAULT_OANDA_TOKEN_ENV = "OANDA_API_TOKEN"

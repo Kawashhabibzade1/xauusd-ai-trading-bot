@@ -4,125 +4,116 @@
   "interval": "1min",
   "source_timezone": "UTC",
   "source_rows": 5000,
-  "source_start": "2026-04-02 11:18:00",
-  "source_end": "2026-04-05 22:37:00",
+  "source_start": "2026-04-06 01:02:00",
+  "source_end": "2026-04-09 12:21:00",
   "source_has_volume": false,
   "synthesized_volume": true,
   "volume_mode": "range_proxy",
   "standardized_rows": 5000,
-  "standardized_start": "2026-04-02 11:18:00",
-  "standardized_end": "2026-04-05 22:37:00",
-  "overlap_rows": 480,
-  "overlap_start": "2026-04-02 13:00:00",
-  "overlap_end": "2026-04-03 16:59:00",
-  "feature_rows": 241,
-  "feature_time": "2026-04-03 16:59:00",
-  "labeled_rows": 226,
+  "standardized_start": "2026-04-06 01:02:00",
+  "standardized_end": "2026-04-09 12:21:00",
+  "overlap_rows": 720,
+  "overlap_start": "2026-04-06 13:00:00",
+  "overlap_end": "2026-04-08 16:59:00",
+  "feature_rows": 481,
+  "feature_time": "2026-04-08 16:59:00",
+  "labeled_rows": 466,
   "validation_rows": 100,
-  "runtime_status": "skipped by flag",
+  "runtime_status": "OK",
   "prediction": {
-    "time": "2026-04-03 16:59:00",
-    "label": "HOLD",
-    "prob_short": 0.0,
-    "prob_hold": 0.9999738805,
-    "prob_long": 2.61195e-05
+    "time": "2026-04-08 16:59:00",
+    "label": "LONG",
+    "prob_short": 0.2013554887,
+    "prob_hold": 0.1987342993,
+    "prob_long": 0.599910212
   },
   "training": {
-    "accuracy": 1.0,
-    "best_iteration": 115,
-    "train_samples": 180,
-    "test_samples": 46
+    "accuracy": 0.5106382978723404,
+    "best_iteration": 20,
+    "train_samples": 372,
+    "test_samples": 94
   },
   "confidence": {
-    "test_samples": 46,
+    "test_samples": 94,
     "threshold_results": [
       {
         "threshold": 0.4,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 91,
+        "accuracy": 0.5054945054945055,
+        "pct_total": 96.80851063829788,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 0.9787234042553191
       },
       {
         "threshold": 0.45,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 77,
+        "accuracy": 0.5454545454545454,
+        "pct_total": 81.91489361702128,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.5,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 73,
+        "accuracy": 0.547945205479452,
+        "pct_total": 77.6595744680851,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.55,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 67,
+        "accuracy": 0.5373134328358209,
+        "pct_total": 71.27659574468085,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.6,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 60,
+        "accuracy": 0.5,
+        "pct_total": 63.829787234042556,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.65,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 41,
+        "accuracy": 0.5609756097560976,
+        "pct_total": 43.61702127659575,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.7,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
+        "samples": 16,
+        "accuracy": 0.8125,
+        "pct_total": 17.02127659574468,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       },
       {
         "threshold": 0.75,
-        "samples": 46,
+        "samples": 1,
         "accuracy": 1.0,
-        "pct_total": 100.0,
+        "pct_total": 1.0638297872340425,
         "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
-      },
-      {
-        "threshold": 0.8,
-        "samples": 46,
-        "accuracy": 1.0,
-        "pct_total": 100.0,
-        "short_acc": 0.0,
-        "hold_acc": 1.0,
-        "long_acc": 0.0
+        "hold_acc": 0.0,
+        "long_acc": 1.0
       }
     ],
-    "selected_threshold": 0.4,
-    "selected_accuracy": 1.0,
-    "selected_retained_pct": 100.0,
+    "selected_threshold": 0.7,
+    "selected_accuracy": 0.8125,
+    "selected_retained_pct": 17.02127659574468,
     "selection_reason": "target_met",
-    "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         0\n        HOLD      1.000     1.000     1.000        46\n        LONG      0.000     0.000     0.000         0\n\n    accuracy                          1.000        46\n   macro avg      0.333     0.333     0.333        46\nweighted avg      1.000     1.000     1.000        46\n"
+    "classification_report": "              precision    recall  f1-score   support\n\n       SHORT      0.000     0.000     0.000         3\n        HOLD      0.000     0.000     0.000         0\n        LONG      0.812     1.000     0.897        13\n\n    accuracy                          0.812        16\n   macro avg      0.271     0.333     0.299        16\nweighted avg      0.660     0.812     0.728        16\n"
   },
   "backtest": {
     "simulation_type": "approximate_non_executable",
@@ -130,14 +121,14 @@
       "confidence_threshold": 0.55,
       "initial_capital": 50.0
     },
-    "signals_retained": 46,
+    "signals_retained": 67,
     "performance": {
-      "total_trades": 0,
-      "win_rate": 0.0,
-      "profit_factor": 0.0,
-      "ending_equity": 50.0,
-      "return_percent": 0.0,
-      "max_drawdown": 0.0
+      "total_trades": 67,
+      "win_rate": 0.7014925373134329,
+      "profit_factor": 2.35,
+      "ending_equity": 117.5,
+      "return_percent": 135.0,
+      "max_drawdown": -42.5
     },
     "output_path": "/Volumes/kawash/Zainnuddin/newbot2026.04/xauusd-ai-trading-bot/python_training/models/live_twelvedata/backtest_results.json"
   },

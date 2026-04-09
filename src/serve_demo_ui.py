@@ -1,5 +1,5 @@
 """
-Serve a simple local dashboard for the sample demo or the live Twelve Data pipeline.
+Serve a simple local dashboard for the sample demo with optional local MT5 market context.
 """
 
 from __future__ import annotations
@@ -14,10 +14,9 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from pipeline_contract import DEFAULT_LIVE_REPORT_PATH, display_path, resolve_repo_path
-from run_live_twelvedata_pipeline import run_live_pipeline
+from pipeline_contract import resolve_repo_path
+from research_streamlit_data import load_live_market_snapshot
 from run_sample_demo import DEFAULT_INPUT, DEFAULT_MODEL, run_demo_pipeline
-from twelvedata_client import fetch_time_series, resolve_api_key
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,9 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=4174, help="Local port for the dashboard.")
     parser.add_argument(
         "--pipeline-mode",
-        choices=("auto", "sample", "live"),
+        choices=("auto", "sample"),
         default="auto",
-        help="Which pipeline to serve. 'auto' uses live mode when a Twelve Data API key is available.",
+        help="Which pipeline to serve. The demo UI is sample-only and uses MT5 for live market context.",
     )
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Sample/demo OHLCV CSV input.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Saved LightGBM model used for the sample demo.")
@@ -56,25 +55,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Serve the UI using existing generated artifacts without rerunning the selected pipeline first.",
     )
-    parser.add_argument(
-        "--twelvedata-env",
-        default="TWELVEDATA_API_KEY",
-        help="Environment variable that stores the Twelve Data API key.",
-    )
-    parser.add_argument("--twelvedata-symbol", default="XAU/USD", help="Symbol used for the live Twelve Data market snapshot.")
-    parser.add_argument("--twelvedata-outputsize", type=int, default=20, help="Number of recent Twelve Data bars to show in the live market preview.")
-    parser.add_argument(
-        "--twelvedata-pipeline-outputsize",
-        type=int,
-        default=5000,
-        help="Number of recent Twelve Data bars to fetch for the live pipeline.",
-    )
-    parser.add_argument(
-        "--twelvedata-volume-mode",
-        choices=("constant", "range_proxy"),
-        default="range_proxy",
-        help="Experimental fallback volume mode when the Twelve Data feed has no source volume.",
-    )
+    parser.add_argument("--mt5-symbol", default="XAUUSD", help="Symbol used for the local MT5 market snapshot.")
+    parser.add_argument("--mt5-outputsize", type=int, default=20, help="Number of recent MT5 bars to show in the live market preview.")
     return parser.parse_args()
 
 
@@ -102,56 +84,57 @@ def preview_frame(path: Path, rows: int = 5) -> dict:
     }
 
 
-def build_live_market_payload(time_series: dict | None, error: str | None = None) -> dict | None:
-    if error:
-        return {
-            "enabled": False,
-            "error": error,
-        }
-
-    if time_series is None:
+def build_live_market_payload(snapshot: dict | None) -> dict | None:
+    if snapshot is None:
         return None
 
-    values = time_series["values"]
-    latest = values[-1]
-    previous = values[-2] if len(values) > 1 else latest
-    change = latest["close"] - previous["close"]
-    change_pct = (change / previous["close"] * 100.0) if previous["close"] else 0.0
-    high_lookback = max(item["high"] for item in values)
-    low_lookback = min(item["low"] for item in values)
-    meta = time_series["meta"]
+    if snapshot.get("error"):
+        return {
+            "enabled": False,
+            "error": snapshot["error"],
+        }
+
+    frame = snapshot.get("frame")
+    if frame is None or getattr(frame, "empty", True):
+        return {
+            "enabled": False,
+            "error": "Live MT5 snapshot is empty.",
+        }
+
+    latest = snapshot["latest"]
+    meta = snapshot.get("meta", {})
+    high_lookback = float(frame["high"].max())
+    low_lookback = float(frame["low"].min())
 
     preview_rows = []
-    for item in values[-10:]:
+    for _, item in frame.tail(10).iterrows():
         preview_rows.append(
             {
-                "datetime": item["datetime"],
-                "open": item["open"],
-                "high": item["high"],
-                "low": item["low"],
-                "close": item["close"],
+                "datetime": str(item.get("time", item.get("datetime", ""))),
+                "open": float(item["open"]),
+                "high": float(item["high"]),
+                "low": float(item["low"]),
+                "close": float(item["close"]),
             }
         )
 
     return {
         "enabled": True,
-        "symbol": meta.get("symbol", "XAU/USD"),
-        "type": meta.get("type", "Unknown"),
-        "last_time": latest["datetime"],
-        "last_close": latest["close"],
-        "change": change,
-        "change_pct": change_pct,
+        "symbol": str(snapshot.get("display_symbol", meta.get("symbol", "XAUUSD"))),
+        "type": "MT5 Local",
+        "last_time": str(latest.get("datetime", latest.get("time", ""))),
+        "last_close": float(latest["close"]),
+        "change": float(snapshot.get("change", 0.0)),
+        "change_pct": float(snapshot.get("change_pct", 0.0)),
         "high_lookback": high_lookback,
         "low_lookback": low_lookback,
-        "interval": meta.get("interval", "1min"),
-        "has_volume": time_series["has_volume"],
-        "note": (
-            "Twelve Data XAU/USD bars do not include volume, so live prediction mode uses an explicit experimental volume fallback."
-            if not time_series["has_volume"]
-            else "Live market bars are available and include source volume."
+        "interval": str(meta.get("timeframe", "M1")),
+        "has_volume": bool(snapshot.get("has_volume", False)),
+        "note": " ".join(
+            part for part in [str(snapshot.get("volume_note", "")).strip(), str(snapshot.get("freshness_note", "")).strip()] if part
         ),
         "preview": {
-            "row_count": len(values),
+            "row_count": int(len(frame)),
             "columns": ["datetime", "open", "high", "low", "close"],
             "rows": preview_rows,
         },
@@ -409,45 +392,20 @@ def make_handler(payload: dict):
 
 def main() -> None:
     args = parse_args()
-    api_key = resolve_api_key(args.twelvedata_env)
-    use_live_pipeline = args.pipeline_mode == "live" or (args.pipeline_mode == "auto" and api_key is not None)
-
-    live_market = None
-    if api_key:
-        try:
-            time_series = fetch_time_series(
-                api_key=api_key,
-                symbol=args.twelvedata_symbol,
-                outputsize=args.twelvedata_outputsize,
-            )
-            live_market = build_live_market_payload(time_series=time_series)
-        except Exception as exc:
-            live_market = build_live_market_payload(time_series=None, error=str(exc))
-
-    if use_live_pipeline:
-        if args.skip_refresh:
-            report_path = resolve_repo_path(DEFAULT_LIVE_REPORT_PATH)
-            if not report_path.exists():
-                raise SystemExit(
-                    f"Live dashboard refresh was skipped, but {display_path(report_path)} does not exist yet."
-                )
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-        else:
-            report = run_live_pipeline(
-                api_env=args.twelvedata_env,
-                symbol=args.twelvedata_symbol,
-                outputsize=args.twelvedata_pipeline_outputsize,
-                volume_mode=args.twelvedata_volume_mode,
-                skip_onnx_runtime_check=args.skip_onnx_runtime_check,
-            )
-        payload = build_live_dashboard_payload(report, live_market)
-    else:
-        demo_result = load_existing_sample_result() if args.skip_refresh else run_demo_pipeline(
-            input_path_like=args.input,
-            model_path_like=args.model,
-            skip_onnx_runtime_check=args.skip_onnx_runtime_check,
+    live_market = build_live_market_payload(
+        load_live_market_snapshot(
+            provider="mt5",
+            mt5_symbol=args.mt5_symbol,
+            symbol=args.mt5_symbol,
+            outputsize=args.mt5_outputsize,
         )
-        payload = build_sample_dashboard_payload(demo_result, live_market)
+    )
+    demo_result = load_existing_sample_result() if args.skip_refresh else run_demo_pipeline(
+        input_path_like=args.input,
+        model_path_like=args.model,
+        skip_onnx_runtime_check=args.skip_onnx_runtime_check,
+    )
+    payload = build_sample_dashboard_payload(demo_result, live_market)
 
     server = ThreadingHTTPServer((args.host, args.port), make_handler(payload))
     print(f"Dashboard available at http://{args.host}:{args.port}")

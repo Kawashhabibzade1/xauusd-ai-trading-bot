@@ -10,11 +10,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-from pandas.errors import EmptyDataError, ParserError
-
+try:
+    import pandas as pd
+    from pandas.errors import EmptyDataError, ParserError
+except Exception:  # pragma: no cover - optional for installer-only paths
+    pd = None  # type: ignore[assignment]
+    EmptyDataError = ValueError  # type: ignore[assignment]
+    ParserError = ValueError  # type: ignore[assignment]
+from env_utils import resolve_env_value
 from pipeline_contract import display_path, ensure_parent_dir, resolve_repo_path
-from twelvedata_client import resolve_env_value
 
 
 DEFAULT_MT5_TERMINAL_ENV = "MT5_TERMINAL_PATH"
@@ -23,6 +27,8 @@ DEFAULT_MT5_PASSWORD_ENV = "MT5_PASSWORD"
 DEFAULT_MT5_SERVER_ENV = "MT5_SERVER"
 DEFAULT_MT5_EXPORT_ENV = "MT5_EXPORT_FILE"
 DEFAULT_MT5_EXPORT_FILENAME = "xauusd_mt5_live.csv"
+DEFAULT_MT5_ACCOUNT_SNAPSHOT_ENV = "MT5_ACCOUNT_SNAPSHOT_FILE"
+DEFAULT_MT5_ACCOUNT_SNAPSHOT_FILENAME = "config/mt5_account_snapshot.csv"
 DEFAULT_MT5_WINE_PREFIX = (
     Path.home() / "Library" / "Application Support" / "net.metaquotes.wine.metatrader5"
 )
@@ -34,6 +40,15 @@ DEFAULT_MT5_EXPERTS_DIR = DEFAULT_MT5_PROGRAM_DIR / "MQL5" / "Experts"
 DEFAULT_MT5_METAEDITOR_EXE = DEFAULT_MT5_PROGRAM_DIR / "MetaEditor64.exe"
 DEFAULT_MT5_TERMINAL_EXE = DEFAULT_MT5_PROGRAM_DIR / "terminal64.exe"
 DEFAULT_MT5_WINE64 = Path("/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64")
+
+
+def _require_pandas() -> Any:
+    if pd is None:
+        raise RuntimeError(
+            "pandas is not available in this environment. "
+            "Install the project requirements before using MT5 data helpers."
+        )
+    return pd
 
 
 def _atomic_copy_file(source: Path, target: Path) -> None:
@@ -166,6 +181,27 @@ def resolve_export_file_path(
         raise RuntimeError(
             "Could not find the local MT5 MQL5/Files directory. "
             "Set MT5_EXPORT_FILE to the CSV written by the MT5 exporter."
+        )
+    return files_dir / filename
+
+
+def resolve_account_snapshot_file_path(
+    path_like: str | Path | None = None,
+    env_name: str = DEFAULT_MT5_ACCOUNT_SNAPSHOT_ENV,
+    filename: str = DEFAULT_MT5_ACCOUNT_SNAPSHOT_FILENAME,
+) -> Path:
+    if path_like:
+        return Path(path_like).expanduser()
+
+    env_path = resolve_env_value(env_name)
+    if env_path:
+        return Path(env_path).expanduser()
+
+    files_dir = get_mt5_files_dir()
+    if files_dir is None:
+        raise RuntimeError(
+            "Could not find the local MT5 MQL5/Files directory. "
+            "Set MT5_ACCOUNT_SNAPSHOT_FILE to the CSV written by the MT5 exporter."
         )
     return files_dir / filename
 
@@ -315,6 +351,82 @@ def fetch_recent_rates(
             else "MT5 local feed is using tick_volume as the model's live volume input."
         ),
     )
+
+
+def fetch_mt5_account_context(
+    symbol: str = "XAUUSD",
+    terminal_path: str | None = None,
+    login: int | None = None,
+    password: str | None = None,
+    server: str | None = None,
+) -> dict[str, Any]:
+    normalized_symbol = normalize_mt5_symbol(symbol)
+    mt5 = _initialize_connection(
+        terminal_path=terminal_path,
+        login=login,
+        password=password,
+        server=server,
+    )
+    try:
+        if not mt5.symbol_select(normalized_symbol, True):
+            raise RuntimeError(f"MT5 symbol_select failed for {normalized_symbol}: {mt5.last_error()}")
+
+        account_info = mt5.account_info()
+        if account_info is None:
+            raise RuntimeError(f"MT5 account_info failed: {mt5.last_error()}")
+
+        symbol_info = mt5.symbol_info(normalized_symbol)
+        if symbol_info is None:
+            raise RuntimeError(f"MT5 symbol_info failed for {normalized_symbol}: {mt5.last_error()}")
+    finally:
+        mt5.shutdown()
+
+    return {
+        "symbol": normalized_symbol,
+        "login": int(getattr(account_info, "login", 0) or 0),
+        "server": str(getattr(account_info, "server", "") or ""),
+        "currency": str(getattr(account_info, "currency", "") or ""),
+        "balance": float(getattr(account_info, "balance", 0.0) or 0.0),
+        "equity": float(getattr(account_info, "equity", 0.0) or 0.0),
+        "leverage": int(getattr(account_info, "leverage", 0) or 0),
+        "contract_size": float(getattr(symbol_info, "trade_contract_size", 0.0) or 0.0),
+        "volume_min": float(getattr(symbol_info, "volume_min", 0.0) or 0.0),
+        "volume_max": float(getattr(symbol_info, "volume_max", 0.0) or 0.0),
+        "volume_step": float(getattr(symbol_info, "volume_step", 0.0) or 0.0),
+    }
+
+
+def load_mt5_account_snapshot(
+    input_path: str | Path | None = None,
+) -> dict[str, Any]:
+    snapshot_path = resolve_account_snapshot_file_path(input_path)
+    if not snapshot_path.exists():
+        raise RuntimeError(
+            f"MT5 account snapshot CSV not found at {snapshot_path}. "
+            "Run the MT5 exporter/bot with account snapshot export enabled first."
+        )
+
+    frame = pd.read_csv(snapshot_path)
+    if frame.empty:
+        raise RuntimeError(f"MT5 account snapshot CSV at {snapshot_path} is empty.")
+
+    latest = frame.iloc[-1].to_dict()
+    return {
+        "source": "mt5_snapshot_csv",
+        "snapshot_path": str(snapshot_path),
+        "time_utc": str(latest.get("time_utc", "")),
+        "symbol": str(latest.get("symbol", "") or ""),
+        "login": int(pd.to_numeric(latest.get("login", 0), errors="coerce") or 0),
+        "server": str(latest.get("server", "") or ""),
+        "currency": str(latest.get("currency", "") or ""),
+        "balance": float(pd.to_numeric(latest.get("balance", 0.0), errors="coerce") or 0.0),
+        "equity": float(pd.to_numeric(latest.get("equity", 0.0), errors="coerce") or 0.0),
+        "leverage": int(pd.to_numeric(latest.get("leverage", 0), errors="coerce") or 0),
+        "contract_size": float(pd.to_numeric(latest.get("contract_size", 0.0), errors="coerce") or 0.0),
+        "volume_min": float(pd.to_numeric(latest.get("volume_min", 0.0), errors="coerce") or 0.0),
+        "volume_max": float(pd.to_numeric(latest.get("volume_max", 0.0), errors="coerce") or 0.0),
+        "volume_step": float(pd.to_numeric(latest.get("volume_step", 0.0), errors="coerce") or 0.0),
+    }
 
 
 def load_exported_rates_csv(

@@ -15,8 +15,8 @@ function renderLiveMarket(liveMarket) {
 
   if (!liveMarket) {
     title.textContent = "Live Market Snapshot";
-    subtitle.textContent = "No Twelve Data API key detected.";
-    note.textContent = "Set TWELVEDATA_API_KEY in your shell before starting the dashboard if you want a live gold snapshot alongside the local demo artifacts.";
+    subtitle.textContent = "No MT5 Local source detected.";
+    note.textContent = "Start MetaTrader 5 locally and keep the exporter or bridge available if you want a live gold snapshot alongside the local demo artifacts.";
     metrics.innerHTML = "";
     table.innerHTML = "";
     return;

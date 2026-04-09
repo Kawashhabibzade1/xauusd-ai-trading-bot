@@ -7,8 +7,10 @@ This path is local-only and is preferred when you want live bars with MT5 tick_v
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -100,7 +102,74 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-onnx-runtime-check", action="store_true", help="Skip optional onnxruntime verification.")
     parser.add_argument("--skip-confidence-analysis", action="store_true", help="Skip confidence threshold analysis.")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip approximate backtest generation.")
+    parser.add_argument(
+        "--force-retrain",
+        action="store_true",
+        help="Always retrain the live LightGBM model instead of reusing the latest MT5 live model artifacts.",
+    )
     return parser.parse_args(argv)
+
+
+def load_cached_training_result(
+    *,
+    model_output: str,
+    feature_list_output: str,
+    metadata_output: str,
+    freshness_references: Sequence[str | Path] = (),
+) -> dict[str, Any] | None:
+    model_path = Path(model_output)
+    feature_list_path = Path(feature_list_output)
+    metadata_path = Path(metadata_output)
+    if not (model_path.exists() and feature_list_path.exists() and metadata_path.exists()):
+        return None
+    artifact_mtime = min(path.stat().st_mtime for path in (model_path, feature_list_path, metadata_path))
+    for reference in freshness_references:
+        reference_path = Path(reference)
+        if reference_path.exists() and artifact_mtime < reference_path.stat().st_mtime:
+            return None
+
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+
+    return {
+        "model_output": model_path,
+        "feature_list_output": feature_list_path,
+        "metadata_output": metadata_path,
+        "ordered_features": [],
+        "best_iteration": int(metadata.get("best_iteration", 0) or 0),
+        "accuracy": float(metadata.get("accuracy", 0.0) or 0.0),
+        "confusion_matrix": [],
+        "classification_report": "reused_cached_live_model",
+        "metadata": metadata,
+        "reused_cached_model": True,
+    }
+
+
+def build_cached_onnx_result(
+    *,
+    onnx_output: str,
+    mt5_features_output: str,
+    mt5_config_output: str,
+    freshness_references: Sequence[str | Path] = (),
+) -> dict[str, Any] | None:
+    artifact_paths = [
+        Path(onnx_output),
+        Path(mt5_features_output),
+        Path(mt5_config_output),
+    ]
+    if not all(path.exists() for path in artifact_paths):
+        return None
+    artifact_mtime = min(path.stat().st_mtime for path in artifact_paths)
+    for reference in freshness_references:
+        reference_path = Path(reference)
+        if reference_path.exists() and artifact_mtime < reference_path.stat().st_mtime:
+            return None
+    return {
+        "runtime_status": "reused_cached_onnx",
+        "output_path": onnx_output,
+        "mt5_features_output": mt5_features_output,
+        "mt5_config_output": mt5_config_output,
+    }
 
 
 def run_live_pipeline(
@@ -136,6 +205,7 @@ def run_live_pipeline(
     skip_onnx_runtime_check: bool = False,
     skip_confidence_analysis: bool = False,
     skip_backtest: bool = False,
+    force_retrain: bool = False,
 ) -> dict:
     verify_dependencies(skip_onnx_runtime_check)
 
@@ -220,17 +290,29 @@ def run_live_pipeline(
     label_output_path = ensure_parent_dir(label_output)
     labeled.to_csv(label_output_path, index=False)
 
-    training_result = train_model_from_labeled(
-        labeled=labeled,
-        feature_config=feature_config,
-        model_config_path=model_config_path,
-        model_output_path=model_output,
-        feature_list_output_path=feature_list_output,
-        metadata_output_path=metadata_output,
-    )
+    training_result = None
+    reused_cached_model = False
+    if not force_retrain:
+        training_result = load_cached_training_result(
+            model_output=model_output,
+            feature_list_output=feature_list_output,
+            metadata_output=metadata_output,
+            freshness_references=(standardized_output_path, overlap_output_path, feature_output_path, label_output_path),
+        )
+        reused_cached_model = training_result is not None
+
+    if training_result is None:
+        training_result = train_model_from_labeled(
+            labeled=labeled,
+            feature_config=feature_config,
+            model_config_path=model_config_path,
+            model_output_path=model_output,
+            feature_list_output_path=feature_list_output,
+            metadata_output_path=metadata_output,
+        )
 
     confidence_result = None
-    if not skip_confidence_analysis:
+    if not skip_confidence_analysis and not reused_cached_model:
         confidence_result = analyze_confidence_from_labeled(
             labeled=labeled,
             model_path=model_output,
@@ -240,7 +322,7 @@ def run_live_pipeline(
         json_dump(confidence_result, confidence_output)
 
     backtest_result = None
-    if not skip_backtest:
+    if not skip_backtest and not reused_cached_model:
         backtest_result = run_signal_simulation(
             labeled=labeled,
             model_path=model_output,
@@ -256,25 +338,32 @@ def run_live_pipeline(
         feature_config=feature_config,
     )
 
-    onnx_result = export_model_to_onnx(
-        model_path=model_output,
-        feature_list_path=feature_list_output,
-        feature_config=feature_config,
-        output_path=onnx_output,
-        mt5_features_output=mt5_features_output,
-        mt5_config_output=mt5_config_output,
-        skip_runtime_check=skip_onnx_runtime_check,
-    )
+    onnx_result = None
+    if reused_cached_model:
+        onnx_result = build_cached_onnx_result(
+            onnx_output=onnx_output,
+            mt5_features_output=mt5_features_output,
+            mt5_config_output=mt5_config_output,
+            freshness_references=(Path(model_output), Path(feature_list_output), Path(metadata_output), Path(validation_output)),
+        )
+    if onnx_result is None:
+        onnx_result = export_model_to_onnx(
+            model_path=model_output,
+            feature_list_path=feature_list_output,
+            feature_config=feature_config,
+            output_path=onnx_output,
+            mt5_features_output=mt5_features_output,
+            mt5_config_output=mt5_config_output,
+            skip_runtime_check=skip_onnx_runtime_check,
+        )
     synced_mt5_files = []
     sync_error = None
+    files_to_sync = [validation_output]
+    if not reused_cached_model or onnx_result.get("runtime_status") != "reused_cached_onnx":
+        files_to_sync.extend([onnx_output, mt5_features_output, mt5_config_output])
     try:
         synced_mt5_files = sync_mt5_file_artifacts(
-            [
-                validation_output,
-                onnx_output,
-                mt5_features_output,
-                mt5_config_output,
-            ]
+            files_to_sync
         )
     except Exception as exc:
         sync_error = str(exc)
@@ -318,8 +407,9 @@ def run_live_pipeline(
         "training": {
             "accuracy": float(training_result["accuracy"]),
             "best_iteration": int(training_result["best_iteration"]),
-            "train_samples": int(training_result["metadata"]["train_samples"]),
-            "test_samples": int(training_result["metadata"]["test_samples"]),
+            "train_samples": int(training_result["metadata"].get("train_samples", 0)),
+            "test_samples": int(training_result["metadata"].get("test_samples", 0)),
+            "reused_cached_model": reused_cached_model,
         },
         "confidence": confidence_result,
         "backtest": backtest_result,
@@ -346,6 +436,11 @@ def run_live_pipeline(
             ),
             "This MT5 path is local-only and requires a running MetaTrader terminal on the same machine.",
             "Training, confidence analysis, and backtest outputs come from the recent MT5 fetch window only, not a full historical regime study.",
+            (
+                "Reused the latest cached live MT5 LightGBM model for low-latency signal refresh."
+                if reused_cached_model
+                else "Retrained the live MT5 LightGBM model during this run."
+            ),
             f"Active hunt timezone: {active_hunt_timezone}.",
             (
                 f"Synced {len(synced_mt5_files)} MT5 artifact files into the local MQL5/Files directory."
@@ -394,6 +489,7 @@ def run_from_args(args: argparse.Namespace) -> dict:
         skip_onnx_runtime_check=args.skip_onnx_runtime_check,
         skip_confidence_analysis=args.skip_confidence_analysis,
         skip_backtest=args.skip_backtest,
+        force_retrain=args.force_retrain,
     )
 
 
