@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -88,6 +90,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def load_config(path_like: str) -> dict[str, Any]:
     with resolve_repo_path(path_like).open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def drop_latest_live_bar(
+    frame: pd.DataFrame,
+    *,
+    time_column: str = "time",
+) -> tuple[pd.DataFrame, str]:
+    if frame.empty or time_column not in frame.columns:
+        return frame.copy(), ""
+
+    working = frame.copy()
+    working[time_column] = pd.to_datetime(working[time_column], errors="coerce")
+    working = working.dropna(subset=[time_column]).sort_values(time_column).drop_duplicates(subset=time_column).reset_index(drop=True)
+    if len(working) <= 1:
+        return working, ""
+
+    dropped_time = working[time_column].iloc[-1]
+    trimmed = working.iloc[:-1].copy().reset_index(drop=True)
+    return trimmed, (str(dropped_time) if pd.notna(dropped_time) else "")
+
+
+def write_csv_atomically(frame: pd.DataFrame, output_path: str | Path, **kwargs: Any) -> Path:
+    output_file = ensure_parent_dir(output_path)
+    temp_output = output_file.with_name(f".{output_file.name}.tmp-{os.getpid()}-{pd.Timestamp.utcnow().value}")
+    try:
+        frame.to_csv(temp_output, **kwargs)
+        os.replace(temp_output, output_file)
+    finally:
+        if temp_output.exists():
+            temp_output.unlink()
+    return output_file
 
 
 def session_name_from_hour(hour_value: int) -> str:
@@ -466,6 +499,37 @@ def simulate_paper_trades(
     equity_curve: list[dict[str, Any]] = []
     open_trade_summary: dict[str, Any] | None = None
     trade_id = 0
+    ledger_columns = [
+        "trade_id",
+        "signal_time",
+        "entry_time",
+        "exit_time",
+        "direction",
+        "session_name",
+        "trade_window_name",
+        "regime",
+        "entry_price",
+        "stop_loss",
+        "tp1",
+        "tp2",
+        "exit_price",
+        "exit_reason",
+        "tp1_hit",
+        "tp2_hit",
+        "setup_score",
+        "expected_value",
+        "entry_quality",
+        "risk_cash",
+        "volume_lots",
+        "position_sizing_mode",
+        "assumed_contract_size",
+        "realized_r",
+        "pnl_cash",
+        "equity_before",
+        "equity_after",
+        "manual_override_used",
+        "manual_override_reason",
+    ]
 
     for index, row in working.iterrows():
         signal_time = pd.Timestamp(row["time"])
@@ -671,7 +735,7 @@ def simulate_paper_trades(
         equity = equity_after
         next_available_time = pd.Timestamp(exit_time) if exit_time else None
 
-    ledger = pd.DataFrame(ledger_rows)
+    ledger = pd.DataFrame(ledger_rows, columns=ledger_columns)
     if ledger.empty:
         summary = {
             "starting_equity": float(paper_cfg["starting_equity"]),
@@ -980,12 +1044,118 @@ def build_history_trade_key(row: pd.Series) -> str:
 
 
 def build_final_trade_key(row: pd.Series) -> str:
-    exit_time = str(row.get("exit_time", "")).strip()
+    history_trade_key = str(row.get("history_trade_key", "")).strip()
+    if history_trade_key:
+        return history_trade_key
+    signal_time = str(row.get("signal_time", "")).strip()
     direction = str(row.get("direction", "")).strip().upper()
     trade_window_name = str(row.get("trade_window_name", "") or row.get("session_name", "")).strip()
+    if signal_time and direction and trade_window_name:
+        return "|".join([signal_time, direction, trade_window_name])
+    exit_time = str(row.get("exit_time", "")).strip()
     if not exit_time or not direction or not trade_window_name:
         return ""
     return "|".join([exit_time, direction, trade_window_name])
+
+
+def infer_trade_signal_timestamp(row: pd.Series) -> pd.Timestamp:
+    for column in ("signal_time", "entry_time"):
+        parsed = pd.to_datetime(row.get(column), errors="coerce", utc=True)
+        if pd.notna(parsed):
+            return parsed
+    for column in ("history_trade_key", "final_trade_key"):
+        key_text = str(row.get(column, "")).strip()
+        if not key_text:
+            continue
+        candidate = key_text.split("|", 1)[0].strip()
+        parsed = pd.to_datetime(candidate, errors="coerce", utc=True)
+        if pd.notna(parsed):
+            return parsed
+    return pd.NaT
+
+
+def backfill_trade_key_times(
+    frame: pd.DataFrame,
+    *,
+    key_column: str,
+    signal_column: str = "signal_time",
+    entry_column: str = "entry_time",
+) -> pd.DataFrame:
+    if frame.empty or key_column not in frame.columns:
+        return frame
+
+    working = frame.copy()
+    inferred_times = pd.to_datetime(
+        working[key_column].astype(str).str.split("|").str[0],
+        errors="coerce",
+        utc=True,
+    )
+    for column in (signal_column, entry_column):
+        if column not in working.columns:
+            continue
+        parsed = pd.to_datetime(working[column], errors="coerce", utc=True)
+        missing = parsed.isna()
+        if missing.any():
+            working.loc[missing, column] = inferred_times.loc[missing]
+    return working
+
+
+def drop_malformed_closed_trade_rows(
+    frame: pd.DataFrame,
+    *,
+    key_column: str,
+    exit_column: str = "exit_time",
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    working = frame.copy()
+    if key_column in working.columns:
+        working = working.loc[working[key_column].astype(str).str.len() > 0].copy()
+    if exit_column in working.columns:
+        exit_times = pd.to_datetime(working[exit_column], errors="coerce", utc=True)
+        working = working.loc[exit_times.notna()].copy()
+    return working
+
+
+def sanitize_trade_history_frame(
+    frame: pd.DataFrame,
+    *,
+    key_column: str = "history_trade_key",
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    working = frame.copy()
+    for column in ("snapshot_created_at", "source_start", "source_end", "signal_time", "entry_time", "exit_time"):
+        if column in working.columns:
+            working[column] = pd.to_datetime(working[column], errors="coerce", utc=True)
+
+    working = backfill_trade_key_times(working, key_column=key_column)
+    working = drop_malformed_closed_trade_rows(working, key_column=key_column)
+
+    sort_columns = [column for column in ("snapshot_created_at", "source_end", "signal_time", "exit_time") if column in working.columns]
+    if sort_columns:
+        working = working.sort_values(by=sort_columns, ascending=True).copy()
+    if key_column in working.columns:
+        working = working.drop_duplicates(subset=[key_column], keep="last").copy()
+
+    for column in ("snapshot_created_at", "source_start", "source_end", "signal_time", "entry_time", "exit_time"):
+        if column in working.columns:
+            working[column] = working[column].astype(str).replace("NaT", "")
+
+    return working
+
+
+def resolve_trade_curve_time(row: pd.Series) -> str:
+    for column in ("exit_time", "signal_time", "entry_time"):
+        parsed = pd.to_datetime(row.get(column), errors="coerce", utc=True)
+        if pd.notna(parsed):
+            return parsed.isoformat()
+    inferred = infer_trade_signal_timestamp(row)
+    if pd.notna(inferred):
+        return inferred.isoformat()
+    return ""
 
 
 def build_trade_summary_from_ledger(
@@ -1045,13 +1215,12 @@ def build_trade_summary_from_ledger(
         contract_series = pd.to_numeric(ledger["assumed_contract_size"], errors="coerce").dropna()
         if not contract_series.empty:
             summary_contract_size = float(contract_series.iloc[-1])
-    equity_curve = [
-        {
-            "time": str(row.exit_time) if pd.notna(row.exit_time) else str(row.signal_time),
-            "equity": float(row.equity_after),
-        }
-        for row in ledger.loc[:, ["signal_time", "exit_time", "equity_after"]].itertuples(index=False)
-    ]
+    equity_curve = []
+    for _, row in ledger.iterrows():
+        point_time = resolve_trade_curve_time(row)
+        if not point_time:
+            continue
+        equity_curve.append({"time": point_time, "equity": float(row.get("equity_after", 0.0))})
     return {
         "starting_equity": starting_equity,
         "ending_equity": ending_equity,
@@ -1141,10 +1310,30 @@ def materialize_final_trade_ledger(
         if column in frame.columns:
             frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
 
+    frame = backfill_trade_key_times(frame, key_column="history_trade_key")
+    frame = drop_malformed_closed_trade_rows(frame, key_column="final_trade_key")
+    if frame.empty:
+        empty = pd.DataFrame(columns=base_columns)
+        empty.to_csv(final_path, index=False)
+        return empty, build_trade_summary_from_ledger(empty, starting_equity, open_trade_summary)
+
     sort_columns = [column for column in ("snapshot_created_at", "source_end", "signal_time", "exit_time") if column in frame.columns]
     ordered = frame.sort_values(by=sort_columns, ascending=True).copy()
-    final_ledger = ordered.drop_duplicates(subset=["final_trade_key"], keep="first").copy()
+    final_ledger = ordered.drop_duplicates(subset=["final_trade_key"], keep="last").copy()
     final_sort_columns = [column for column in ("exit_time", "signal_time", "snapshot_created_at") if column in final_ledger.columns]
+    if final_sort_columns:
+        final_ledger = final_ledger.sort_values(by=final_sort_columns, ascending=True).copy()
+
+    for index, row in final_ledger.iterrows():
+        inferred_signal_time = infer_trade_signal_timestamp(row)
+        if pd.isna(inferred_signal_time):
+            continue
+        signal_time = pd.to_datetime(row.get("signal_time"), errors="coerce", utc=True)
+        entry_time = pd.to_datetime(row.get("entry_time"), errors="coerce", utc=True)
+        if pd.isna(signal_time):
+            final_ledger.at[index, "signal_time"] = inferred_signal_time
+        if pd.isna(entry_time):
+            final_ledger.at[index, "entry_time"] = inferred_signal_time
     if final_sort_columns:
         final_ledger = final_ledger.sort_values(by=final_sort_columns, ascending=True).copy()
 
@@ -1203,14 +1392,35 @@ def append_trade_history(
     existing = pd.read_csv(history_path) if history_path.exists() else pd.DataFrame()
     if not existing.empty and "history_trade_key" not in existing.columns:
         existing["history_trade_key"] = existing.apply(build_history_trade_key, axis=1)
+    prediction_window = report.get("prediction_window", {}) or {}
+    rebuild_window_start = pd.to_datetime(prediction_window.get("start"), errors="coerce", utc=True)
+    rebuild_window_end = pd.to_datetime(prediction_window.get("end"), errors="coerce", utc=True)
+    if (pd.isna(rebuild_window_start) or pd.isna(rebuild_window_end)) and not paper_ledger.empty and "signal_time" in paper_ledger.columns:
+        signal_times = pd.to_datetime(paper_ledger["signal_time"], errors="coerce", utc=True)
+        if signal_times.notna().any():
+            rebuild_window_start = signal_times.min()
+            rebuild_window_end = signal_times.max()
+    source_meta = report.get("mt5_live_source", {}) or {}
+    if not existing.empty and "signal_time" in existing.columns and pd.notna(rebuild_window_start) and pd.notna(rebuild_window_end):
+        existing_signal_times = pd.to_datetime(existing["signal_time"], errors="coerce", utc=True)
+        # Only the current prediction window is authoritative; older frozen trades must survive empty future runs.
+        keep_existing = (
+            existing_signal_times.isna()
+            | existing_signal_times.lt(rebuild_window_start)
+            | existing_signal_times.gt(rebuild_window_end)
+        )
+        existing = existing.loc[keep_existing].copy()
 
     if paper_ledger.empty:
         if history_path.exists():
+            existing = sanitize_trade_history_frame(existing)
+            existing.to_csv(ensure_parent_dir(trade_history_output), index=False)
             return existing
         empty_columns = [
             "history_trade_key",
             "snapshot_run_id",
             "snapshot_created_at",
+            "source_start",
             "source_end",
             "latest_signal_time_at_run",
             "latest_signal_at_run",
@@ -1224,6 +1434,7 @@ def append_trade_history(
     history_rows["history_trade_key"] = history_rows.apply(build_history_trade_key, axis=1)
     history_rows["snapshot_run_id"] = snapshot_run_id
     history_rows["snapshot_created_at"] = snapshot_created_at
+    history_rows["source_start"] = str(source_meta.get("start", ""))
     history_rows["source_end"] = str(report.get("mt5_live_source", {}).get("end", ""))
     history_rows["latest_signal_time_at_run"] = str(report.get("latest_signal", {}).get("time", ""))
     history_rows["latest_signal_at_run"] = str(report.get("latest_signal", {}).get("recommended_trade", ""))
@@ -1232,6 +1443,7 @@ def append_trade_history(
         "history_trade_key",
         "snapshot_run_id",
         "snapshot_created_at",
+        "source_start",
         "source_end",
         "latest_signal_time_at_run",
         "latest_signal_at_run",
@@ -1243,9 +1455,9 @@ def append_trade_history(
         combined = history_rows.copy()
     else:
         existing = existing.reindex(columns=ordered_columns, fill_value="")
-        existing_keys = set(existing["history_trade_key"].astype(str))
-        new_rows = history_rows.loc[~history_rows["history_trade_key"].isin(existing_keys)].copy()
-        combined = pd.concat([existing, new_rows], ignore_index=True)
+        combined = pd.concat([existing, history_rows], ignore_index=True)
+
+    combined = sanitize_trade_history_frame(combined)
 
     combined.to_csv(ensure_parent_dir(trade_history_output), index=False)
     return combined
@@ -1331,6 +1543,12 @@ def build_report(
     snapshot_created_at: str,
 ) -> dict[str, Any]:
     latest = predictions.iloc[-1]
+    prediction_times = pd.to_datetime(predictions["time"], errors="coerce") if "time" in predictions.columns else pd.Series(dtype="datetime64[ns]")
+    prediction_window_start = ""
+    prediction_window_end = ""
+    if not prediction_times.empty and prediction_times.notna().any():
+        prediction_window_start = str(prediction_times.min())
+        prediction_window_end = str(prediction_times.max())
     confidence_report = live_report.get("confidence") or {}
     baseline_horizons = {
         "5": {
@@ -1392,6 +1610,11 @@ def build_report(
             "hunt_timezone": live_report.get("hunt_timezone", "UTC"),
             "hunt_windows": list(live_report.get("hunt_windows", [])),
             "raw_output": live_report.get("artifacts", {}).get("raw_output", display_path(DEFAULT_MT5_LIVE_RAW_INPUT)),
+        },
+        "prediction_window": {
+            "start": prediction_window_start,
+            "end": prediction_window_end,
+            "rows": int(len(predictions)),
         },
         "latest_signal": {
             "time": str(latest["time"]),
@@ -1513,13 +1736,13 @@ def write_outputs(
         assumed_contract_size=float(current_run_summary.get("assumed_contract_size", 100.0) or 100.0),
     )
     report["paper_trading"] = final_summary
-    report["backtest"] = final_summary
+    report["backtest"] = current_run_summary
     report["frozen_paper_trading"] = final_summary
     report.setdefault("dataset_summary", {})["saved_history_rows"] = int(len(trade_history))
     report["dataset_summary"]["paper_trade_rows"] = int(len(final_trade_ledger))
     report["dataset_summary"]["current_run_paper_trade_rows"] = int(len(paper_ledger))
     trade_directive = build_trade_directive_frame(predictions)
-    trade_directive.to_csv(ensure_parent_dir(trade_directive_output), index=False)
+    write_csv_atomically(trade_directive, trade_directive_output, index=False)
     synced_directive_targets: list[str] = []
     sync_error = ""
     try:
@@ -1599,10 +1822,13 @@ def run_mt5_research_pipeline(
 
     validation_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_MT5_VALIDATION_OUTPUT))
     feature_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_FEATURE_OUTPUT))
+    validation_df, excluded_live_bar_time = drop_latest_live_bar(validation_df)
+    feature_df, _ = drop_latest_live_bar(feature_df)
     base_columns = ["time", "open", "high", "low", "close", "volume"]
     feature_subset = feature_df.loc[:, [column for column in base_columns if column in feature_df.columns]].copy()
     validation_df = validation_df.merge(feature_subset, on="time", how="left")
     raw_df = pd.read_csv(resolve_repo_path(DEFAULT_MT5_LIVE_RAW_INPUT))
+    raw_df, _ = drop_latest_live_bar(raw_df)
     manual_override = load_manual_override(manual_override_output)
     predictions = build_prediction_frame(validation_df, config_payload, source_timezone=source_timezone)
     overlays = build_overlay_objects(predictions)
@@ -1638,6 +1864,11 @@ def run_mt5_research_pipeline(
         snapshot_run_id=snapshot_run_id,
         snapshot_created_at=snapshot_created_at,
     )
+    if excluded_live_bar_time:
+        report.setdefault("notes", []).append(
+            "The latest still-forming MT5 M1 bar was excluded from paper trading and the MT5 trade directive "
+            f"to keep broker execution aligned with closed candles ({excluded_live_bar_time} UTC)."
+        )
     write_outputs(
         predictions,
         overlays,

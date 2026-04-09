@@ -1,2 +1,2 @@
 epoch_utc,time_utc,recommended_trade,gate_status,paper_status,paper_reason_blocked,directional_confidence,setup_score,expected_value,entry_price,stop_loss,tp1,tp2,session_name,manual_override_used,execution_scope,learning_source,streamlit_scope
-1775722740,2026-04-09 08:19:00,WATCH,BLOCKED,BLOCKED,H60_NOT_CONFIRMED|NEGATIVE_EV,0.4824587351,0.422106430795,0.0,4717.29,4713.36,4723.185,4727.115,Morning Hunt,False,demo_only,paper_only,paper_research_only
+1775732760,2026-04-09 11:06:00,WATCH,BLOCKED,BLOCKED,MAIN_BIAS_HOLD|LOW_CONFIDENCE|NEGATIVE_EV,0.3531136839,0.4764011577549999,0.0,4722.05,4719.3483540339,4726.1024689491505,4728.8041149152505,Morning Hunt,False,demo_only,paper_only,paper_research_only

@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 
 import lightgbm as lgb
+import onnx
+from onnx import TensorProto, helper
 
 from pipeline_contract import (
     DEFAULT_FEATURE_CONFIG,
@@ -51,6 +53,39 @@ def verify_runtime(onnx_path: Path, feature_count: int) -> None:
     session.run(None, {session.get_inputs()[0].name: test_input})
 
 
+def strip_zipmap_output(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    zipmap_node = next((node for node in onnx_model.graph.node if node.op_type == "ZipMap"), None)
+    if zipmap_node is None:
+        return onnx_model
+
+    probability_input = zipmap_node.input[0]
+    probability_output = zipmap_node.output[0]
+    class_count = next((len(attr.ints) for attr in zipmap_node.attribute if attr.name == "classlabels_int64s"), 0)
+    if class_count <= 0:
+        class_count = 3
+
+    producer = next((node for node in onnx_model.graph.node if probability_input in node.output), None)
+    if producer is not None:
+        producer.output[:] = [probability_output if output == probability_input else output for output in producer.output]
+
+    retained_nodes = [node for node in onnx_model.graph.node if node is not zipmap_node]
+    del onnx_model.graph.node[:]
+    onnx_model.graph.node.extend(retained_nodes)
+
+    for output in onnx_model.graph.output:
+        if output.name == probability_output:
+            output.CopyFrom(
+                helper.make_tensor_value_info(
+                    probability_output,
+                    TensorProto.FLOAT,
+                    [None, class_count],
+                )
+            )
+            break
+
+    return onnx_model
+
+
 def export_model_to_onnx(
     model_path: str = DEFAULT_MODEL_PATH,
     feature_list_path: str = DEFAULT_FEATURE_LIST_PATH,
@@ -74,7 +109,13 @@ def export_model_to_onnx(
 
     model = lgb.Booster(model_file=str(resolve_repo_path(model_path)))
     initial_types = [("input", FloatTensorType([None, len(feature_columns)]))]
-    onnx_model = onnxmltools.convert_lightgbm(model, initial_types=initial_types, target_opset=12)
+    onnx_model = onnxmltools.convert_lightgbm(
+        model,
+        initial_types=initial_types,
+        target_opset=12,
+        zipmap=False,
+    )
+    onnx_model = strip_zipmap_output(onnx_model)
 
     output_file = ensure_parent_dir(output_path)
     with output_file.open("wb") as handle:

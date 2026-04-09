@@ -61,13 +61,26 @@ def _resolve_safe_output_path(path_like: str | Path | None, fallback: str | Path
     return resolve_repo_path(fallback)
 
 
+def _resolve_safe_snapshot_root(path_like: str | Path | None) -> Path | None:
+    if not path_like:
+        return None
+    candidate = resolve_repo_path(path_like)
+    if _is_safe_research_output(candidate):
+        return candidate
+    return None
+
+
 def _load_json(path_like: str | Path) -> dict[str, Any]:
     with resolve_repo_path(path_like).open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
 def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> dict[str, Any]:
-    report = _load_json(report_path)
+    live_report = _load_json(report_path)
+    live_outputs = live_report.get("outputs", {})
+    snapshot_root = _resolve_safe_snapshot_root(live_outputs.get("snapshot_root", ""))
+    snapshot_report_path = snapshot_root / "report.json" if snapshot_root else None
+    report = _load_json(snapshot_report_path) if snapshot_report_path and snapshot_report_path.exists() else live_report
     mode = str(report.get("mode", "")).strip().lower()
     is_mt5_live_paper = mode == "mt5_live_paper"
     default_predictions_path = DEFAULT_MT5_RESEARCH_PREDICTIONS_OUTPUT if is_mt5_live_paper else DEFAULT_RESEARCH_PREDICTIONS_OUTPUT
@@ -76,11 +89,36 @@ def load_research_bundle(report_path: str = DEFAULT_RESEARCH_REPORT_OUTPUT) -> d
     default_trade_history_path = DEFAULT_MT5_RESEARCH_TRADE_HISTORY_OUTPUT
     default_final_trade_ledger_path = DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT
     outputs = report.get("outputs", {})
-    predictions_path = _resolve_safe_output_path(outputs.get("predictions_output", default_predictions_path), default_predictions_path)
-    overlays_path = _resolve_safe_output_path(outputs.get("overlays_output", default_overlays_path), default_overlays_path)
-    paper_path = _resolve_safe_output_path(outputs.get("paper_output", default_paper_path), default_paper_path)
-    trade_history_path = _resolve_safe_output_path(outputs.get("trade_history_output", default_trade_history_path), default_trade_history_path)
-    final_trade_ledger_path = _resolve_safe_output_path(outputs.get("final_trade_ledger_output", default_final_trade_ledger_path), default_final_trade_ledger_path)
+    snapshot_root = _resolve_safe_snapshot_root(outputs.get("snapshot_root", "")) or snapshot_root
+
+    def prefer_snapshot_artifact(filename: str, fallback: Path) -> Path:
+        if snapshot_root is None:
+            return fallback
+        candidate = snapshot_root / filename
+        if candidate.exists():
+            return candidate
+        return fallback
+
+    predictions_path = prefer_snapshot_artifact(
+        "predictions.csv",
+        _resolve_safe_output_path(outputs.get("predictions_output", default_predictions_path), default_predictions_path),
+    )
+    overlays_path = prefer_snapshot_artifact(
+        "overlays.json",
+        _resolve_safe_output_path(outputs.get("overlays_output", default_overlays_path), default_overlays_path),
+    )
+    paper_path = prefer_snapshot_artifact(
+        "paper_ledger.csv",
+        _resolve_safe_output_path(outputs.get("paper_output", default_paper_path), default_paper_path),
+    )
+    trade_history_path = _resolve_safe_output_path(
+        outputs.get("trade_history_output", default_trade_history_path),
+        default_trade_history_path,
+    )
+    final_trade_ledger_path = prefer_snapshot_artifact(
+        "final_trade_ledger.csv",
+        _resolve_safe_output_path(outputs.get("final_trade_ledger_output", default_final_trade_ledger_path), default_final_trade_ledger_path),
+    )
 
     predictions = pd.read_csv(predictions_path)
     if "time" in predictions.columns:
@@ -614,7 +652,12 @@ def build_hour_bias_figure(predictions: pd.DataFrame) -> Any:
 def build_equity_curve_figure(report: dict[str, Any]) -> Any:
     import plotly.graph_objects as go
 
-    curve = report.get("backtest", {}).get("equity_curve", [])
+    curve = (
+        report.get("current_run_paper_trading", {}).get("equity_curve", [])
+        or report.get("paper_trading", {}).get("equity_curve", [])
+        or report.get("backtest", {}).get("equity_curve", [])
+        or report.get("frozen_paper_trading", {}).get("equity_curve", [])
+    )
     if not curve:
         figure = go.Figure()
         figure.update_layout(
@@ -893,11 +936,12 @@ def build_trade_period_summary_table(trade_history: pd.DataFrame) -> pd.DataFram
 
     frame = trade_history.copy()
     time_column = "exit_time" if "exit_time" in frame.columns and frame["exit_time"].notna().any() else "signal_time"
-    frame["_summary_time"] = pd.to_datetime(frame[time_column], errors="coerce")
+    frame["_summary_time"] = pd.to_datetime(frame[time_column], errors="coerce", utc=True)
     frame = frame.loc[frame["_summary_time"].notna()].copy()
     if frame.empty:
         return pd.DataFrame()
 
+    frame["_summary_time"] = frame["_summary_time"].dt.tz_convert("Europe/Berlin").dt.tz_localize(None)
     now = pd.Timestamp.now(tz="Europe/Berlin").tz_localize(None)
     today_start = now.normalize()
     week_start = today_start - pd.Timedelta(days=today_start.weekday())
@@ -934,7 +978,23 @@ def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 20
     if trade_history.empty:
         return trade_history
 
-    ordered = trade_history.sort_values(
+    ordered = trade_history.copy()
+    if "signal_time" in ordered.columns and "history_trade_key" in ordered.columns:
+        missing_signal_time = ordered["signal_time"].isna()
+        if missing_signal_time.any():
+            inferred_signal_time = pd.to_datetime(
+                ordered.loc[missing_signal_time, "history_trade_key"].astype(str).str.split("|").str[0],
+                errors="coerce",
+                utc=True,
+            )
+            ordered.loc[missing_signal_time, "signal_time"] = inferred_signal_time
+    if "exit_time" in ordered.columns:
+        exit_times = pd.to_datetime(ordered["exit_time"], errors="coerce", utc=True)
+        ordered = ordered.loc[exit_times.notna()].copy()
+    if ordered.empty:
+        return pd.DataFrame()
+
+    ordered = ordered.sort_values(
         by=[column for column in ("snapshot_created_at", "exit_time", "signal_time") if column in trade_history.columns],
         ascending=True,
     )
@@ -962,7 +1022,11 @@ def build_saved_trade_history_table(trade_history: pd.DataFrame, limit: int = 20
     table = ordered.loc[:, [column for column in columns if column in ordered.columns]].tail(limit).copy()
     for column in ("snapshot_created_at", "signal_time", "entry_time", "exit_time"):
         if column in table.columns:
-            table[column] = table[column].astype(str)
+            table[column] = (
+                table[column]
+                .astype(str)
+                .replace({"NaT": "", "nan": "", "None": ""})
+            )
     for column in ("volume_lots",):
         if column in table.columns:
             table[column] = pd.to_numeric(table[column], errors="coerce").round(3)

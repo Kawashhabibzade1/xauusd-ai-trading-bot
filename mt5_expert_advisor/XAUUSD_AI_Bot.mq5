@@ -10,13 +10,13 @@
 #include <Trade/Trade.mqh>
 #include "FeatureEngine.mqh"
 
-input string   InpModelName            = "models\\xauusd_ai_v1.onnx";
-input bool     InpValidationMode       = true;
+input string   InpModelName            = "models\\xauusd_ai_mt5_live.onnx";
+input bool     InpValidationMode       = false;
 input int      InpServerUtcOffsetHours = 0;
 input bool     InpLogSignals           = true;
 input double   InpConfidenceThresh     = 0.55;
 input int      InpMagicNumber          = 202604;
-input bool     InpEnableDemoTrading    = false;
+input bool     InpEnableDemoTrading    = true;
 input bool     InpDemoOnly             = true;
 input bool     InpRequireTradeDirective = true;
 input int      InpMaxDirectiveEntryDriftPoints = 30;
@@ -41,6 +41,8 @@ float          g_pendingProbabilities[3];
 bool           g_hasPendingTrade = false;
 int            g_successfulTradeCount = 0;
 int            g_hATR14 = INVALID_HANDLE;
+datetime       g_lastAwaitingBarUtc = 0;
+string         g_lastAwaitingMessage = "";
 CTrade         ExtTrade;
 CFeatureEngine ExtFeatureEngine;
 
@@ -153,6 +155,15 @@ int PredictionDirection(long predicted_class)
    return 0;
   }
 
+long PredictedClassFromDirection(int direction)
+  {
+   if(direction > 0)
+      return 2;
+   if(direction < 0)
+      return 0;
+   return 1;
+  }
+
 string DirectionToString(int direction)
   {
    if(direction > 0)
@@ -174,6 +185,15 @@ string PositionTypeToString(long position_type)
 bool IsDemoAccount()
   {
    return ((ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO);
+  }
+
+void LogAwaitingCondition(datetime bar_time_utc, string message)
+  {
+   if(g_lastAwaitingBarUtc == bar_time_utc && g_lastAwaitingMessage == message)
+      return;
+   g_lastAwaitingBarUtc = bar_time_utc;
+   g_lastAwaitingMessage = message;
+   Print(message);
   }
 
 int VolumeDigits(double step)
@@ -340,7 +360,7 @@ bool LoadLatestTradeDirective(TradeDirective &directive)
    directive.tp1 = 0.0;
    directive.tp2 = 0.0;
 
-   int handle = FileOpen(TRADE_DIRECTIVE_FILE, FILE_READ | FILE_CSV | FILE_ANSI | FILE_SHARE_READ);
+   int handle = FileOpen(TRADE_DIRECTIVE_FILE, FILE_READ | FILE_CSV | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE, ',');
    if(handle == INVALID_HANDLE)
       return false;
 
@@ -379,7 +399,13 @@ bool LoadLatestTradeDirective(TradeDirective &directive)
          continue;
         }
 
-      directive.time_utc = (datetime)StringToInteger(epoch_field);
+      long epoch_value = StringToInteger(epoch_field);
+      if(epoch_value <= 0 && time_field != "")
+         epoch_value = (long)StringToTime(time_field);
+      if(epoch_value <= 0 || recommended_trade_field == "" || gate_status_field == "" || paper_status_field == "")
+         continue;
+
+      directive.time_utc = (datetime)epoch_value;
       directive.recommended_trade = recommended_trade_field;
       directive.gate_status = gate_status_field;
       directive.paper_status = paper_status_field;
@@ -414,7 +440,7 @@ void AppendTradeLog(
 )
   {
    FolderCreate("logs");
-   int handle = FileOpen(TRADE_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ);
+   int handle = FileOpen(TRADE_LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ, ',');
    if(handle == INVALID_HANDLE)
      {
       Print("Failed to open trade log file. Error: ", GetLastError());
@@ -577,63 +603,103 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
       return true;
 
    int direction = PredictionDirection(predicted_class);
-   string direction_name = DirectionToString(direction);
    double confidence = MathMax((double)probabilities[0], MathMax((double)probabilities[1], (double)probabilities[2]));
 
-   if(direction == 0)
-     {
-      AppendTradeLog(bar_time_utc, "SKIP", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "hold_signal");
-      return true;
-     }
-
-   if(!InpRequireTradeDirective && confidence < InpConfidenceThresh)
-     {
-      AppendTradeLog(bar_time_utc, "SKIP", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "below_confidence_threshold");
-      return true;
-     }
-
-   if(!IsDemoAccount())
-     {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "demo_only_guard");
-      return true;
-     }
-
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+     {
+      LogAwaitingCondition(
+         bar_time_utc,
+         StringFormat(
+            "Trade permissions blocked for bar %s: terminal=%d ea=%d",
+            TimeToString(bar_time_utc, TIME_DATE | TIME_SECONDS),
+            (int)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED),
+            (int)MQLInfoInteger(MQL_TRADE_ALLOWED)
+         )
+      );
       return false;
+     }
 
    TradeDirective directive;
    bool use_directive_levels = false;
    if(InpRequireTradeDirective)
      {
       if(!LoadLatestTradeDirective(directive))
+        {
+         LogAwaitingCondition(
+            bar_time_utc,
+            StringFormat(
+               "Waiting for trade directive for bar %s: latest directive file could not be read yet.",
+               TimeToString(bar_time_utc, TIME_DATE | TIME_SECONDS)
+            )
+         );
          return false;
-
-      if(directive.time_utc < bar_time_utc)
-         return false;
+        }
 
       if(directive.time_utc > bar_time_utc)
         {
-         AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "directive_time_mismatch");
-         return true;
+         LogAwaitingCondition(
+            bar_time_utc,
+            StringFormat(
+               "Waiting for matching directive: bar=%s latest_directive=%s",
+               TimeToString(bar_time_utc, TIME_DATE | TIME_SECONDS),
+               TimeToString(directive.time_utc, TIME_DATE | TIME_SECONDS)
+            )
+         );
+         return false;
+        }
+      if(directive.time_utc < bar_time_utc)
+        {
+         LogAwaitingCondition(
+            bar_time_utc,
+            StringFormat(
+               "Directive is stale for bar=%s latest_directive=%s",
+               TimeToString(bar_time_utc, TIME_DATE | TIME_SECONDS),
+               TimeToString(directive.time_utc, TIME_DATE | TIME_SECONDS)
+            )
+         );
+         return false;
         }
 
-      int directive_direction = DirectiveDirection(directive);
-      if(directive.gate_status != "READY" || directive.paper_status != "SIGNAL_READY" || directive_direction == 0)
+      direction = DirectiveDirection(directive);
+      confidence = MathMax(0.0, MathMin(1.0, directive.directional_confidence));
+      if(directive.gate_status != "READY" || directive.paper_status != "SIGNAL_READY" || direction == 0)
         {
          string directive_block_reason = directive.paper_reason_blocked;
          if(directive_block_reason == "")
             directive_block_reason = "trade_directive_blocked";
-         AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", directive_block_reason);
-         return true;
-        }
-
-      if(directive_direction != direction)
-        {
-         AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "directive_prediction_mismatch");
+         string directive_direction_name = DirectionToString(direction);
+         if(direction == 0)
+            directive_direction_name = "HOLD";
+         AppendTradeLog(bar_time_utc, "BLOCK", directive_direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", directive_block_reason);
          return true;
         }
 
       use_directive_levels = true;
+     }
+   else
+     {
+      string inferred_direction_name = DirectionToString(direction);
+      if(direction == 0)
+        {
+         AppendTradeLog(bar_time_utc, "SKIP", inferred_direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "hold_signal");
+         return true;
+        }
+
+      if(confidence < InpConfidenceThresh)
+        {
+         AppendTradeLog(bar_time_utc, "SKIP", inferred_direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "below_confidence_threshold");
+         return true;
+        }
+     }
+
+   string direction_name = DirectionToString(direction);
+   g_lastAwaitingBarUtc = 0;
+   g_lastAwaitingMessage = "";
+
+   if(!IsDemoAccount())
+     {
+      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "demo_only_guard");
+      return true;
      }
 
    if(!IsTradeModeAllowed(direction))
@@ -812,7 +878,7 @@ void AppendSignalLog(datetime bar_time_utc, long predicted_class, const float &p
       return;
 
    FolderCreate("logs");
-   int handle = FileOpen(LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ);
+   int handle = FileOpen(LOG_FILE, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_SHARE_READ, ',');
    if(handle == INVALID_HANDLE)
      {
       Print("Failed to open signal log file. Error: ", GetLastError());
@@ -842,7 +908,7 @@ void AppendSignalLog(datetime bar_time_utc, long predicted_class, const float &p
 
 int CompareAgainstValidationFixture(datetime bar_time_utc, const float &features[], long predicted_class, const float &probabilities[])
   {
-   int handle = FileOpen(VALIDATION_FILE, FILE_READ | FILE_CSV | FILE_ANSI);
+   int handle = FileOpen(VALIDATION_FILE, FILE_READ | FILE_CSV | FILE_ANSI, ',');
    if(handle == INVALID_HANDLE)
      {
       Print("Validation fixture not available: ", VALIDATION_FILE);
@@ -927,6 +993,8 @@ int OnInit()
 
    if(InpEnableDemoTrading && !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       Print("Auto-trading is currently disabled in the terminal. The EA will stay idle until you enable it.");
+   if(InpEnableDemoTrading && !MQLInfoInteger(MQL_TRADE_ALLOWED))
+      Print("EA-level trading permission is disabled in the Common tab. Enable 'Allow Algo Trading' for this chart.");
 
    if(InpEnableDemoTrading && !IsDemoAccount())
      {
@@ -939,17 +1007,21 @@ int OnInit()
    if(InpEnableDemoTrading && !InpUseRiskBasedSizing && InpDemoMaxLotSize > 0.0 && InpFixedLotSize > InpDemoMaxLotSize)
       PrintFormat("InpFixedLotSize=%.2f was capped. Demo broker execution cannot exceed %.2f lots.", InpFixedLotSize, InpDemoMaxLotSize);
 
-   string resolved_model_name = ResolveModelName();
-   ExtOnnxHandle = OnnxCreate(resolved_model_name, ONNX_DEFAULT);
-   if(ExtOnnxHandle == INVALID_HANDLE)
+   string resolved_model_name = "";
+   if(!InpRequireTradeDirective)
      {
-      PrintFormat("Failed to load ONNX model '%s'. Error=%d", resolved_model_name, GetLastError());
-      return INIT_FAILED;
-     }
+      resolved_model_name = ResolveModelName();
+      ExtOnnxHandle = OnnxCreate(resolved_model_name, ONNX_DEFAULT);
+      if(ExtOnnxHandle == INVALID_HANDLE)
+        {
+         PrintFormat("Failed to load ONNX model '%s'. Error=%d", resolved_model_name, GetLastError());
+         return INIT_FAILED;
+        }
 
-   long input_shape[] = {1, FEATURE_COUNT};
-   if(!OnnxSetInputShape(ExtOnnxHandle, 0, input_shape))
-      Print("Warning: OnnxSetInputShape failed. Error: ", GetLastError());
+      long input_shape[] = {1, FEATURE_COUNT};
+      if(!OnnxSetInputShape(ExtOnnxHandle, 0, input_shape))
+         Print("Warning: OnnxSetInputShape failed. Error: ", GetLastError());
+     }
 
    g_hATR14 = iATR(_Symbol, PERIOD_CURRENT, 14);
    if(g_hATR14 == INVALID_HANDLE)
@@ -970,7 +1042,10 @@ int OnInit()
    ExtTrade.SetAsyncMode(false);
    ExtTrade.SetTypeFillingBySymbol(_Symbol);
    Print("Validation mode: ", (InpValidationMode ? "ON" : "OFF"));
-   Print("Model loaded: ", resolved_model_name);
+   if(InpRequireTradeDirective)
+      Print("Trade directive mode is ON: local ONNX inference is bypassed and MT5 mirrors the paper-trade directive.");
+   else
+      Print("Model loaded: ", resolved_model_name);
    if(!InpValidationMode && !InpEnableDemoTrading)
       Print("Live signal mode is ON, but demo trade execution is disabled.");
    if(!InpValidationMode && InpEnableDemoTrading)
@@ -1012,37 +1087,40 @@ void OnTick()
       if(!InpRequireTradeDirective && !IsOverlapBar(closed_bar_utc))
          return;
 
-      float features[FEATURE_COUNT];
-      if(!ExtFeatureEngine.ComputeFeatures(1, features))
+      long prediction_class[1] = {1};
+      float probabilities[3] = {0.0f, 1.0f, 0.0f};
+      if(!InpRequireTradeDirective)
         {
-         Print("Feature computation failed.");
-         return;
+         float features[FEATURE_COUNT];
+         if(!ExtFeatureEngine.ComputeFeatures(1, features))
+           {
+            Print("Feature computation failed.");
+            return;
+           }
+
+         if(!OnnxRun(ExtOnnxHandle, ONNX_NO_CONVERSION, features, prediction_class, probabilities))
+           {
+            Print("ONNX inference failed. Error: ", GetLastError());
+            return;
+           }
+
+         int validation_status = 0;
+         if(InpValidationMode)
+            validation_status = CompareAgainstValidationFixture(closed_bar_utc, features, prediction_class[0], probabilities);
+
+         AppendSignalLog(closed_bar_utc, prediction_class[0], probabilities, features, validation_status);
+
+         PrintFormat(
+            "UTC=%s signal=%s probs=[%.4f, %.4f, %.4f] confidence=%.4f validation=%s",
+            TimeToString(closed_bar_utc, TIME_DATE | TIME_SECONDS),
+            PredictionLabel(prediction_class[0]),
+            probabilities[0],
+            probabilities[1],
+            probabilities[2],
+            MathMax(probabilities[0], MathMax(probabilities[1], probabilities[2])),
+            ValidationStatusToString(validation_status)
+         );
         }
-
-      long prediction_class[1];
-      float probabilities[3];
-      if(!OnnxRun(ExtOnnxHandle, ONNX_NO_CONVERSION, features, prediction_class, probabilities))
-        {
-         Print("ONNX inference failed. Error: ", GetLastError());
-         return;
-        }
-
-      int validation_status = 0;
-      if(InpValidationMode)
-         validation_status = CompareAgainstValidationFixture(closed_bar_utc, features, prediction_class[0], probabilities);
-
-      AppendSignalLog(closed_bar_utc, prediction_class[0], probabilities, features, validation_status);
-
-      PrintFormat(
-         "UTC=%s signal=%s probs=[%.4f, %.4f, %.4f] confidence=%.4f validation=%s",
-         TimeToString(closed_bar_utc, TIME_DATE | TIME_SECONDS),
-         PredictionLabel(prediction_class[0]),
-         probabilities[0],
-         probabilities[1],
-         probabilities[2],
-         MathMax(probabilities[0], MathMax(probabilities[1], probabilities[2])),
-         ValidationStatusToString(validation_status)
-      );
 
       g_pendingTradeBarUtc = closed_bar_utc;
       g_pendingPredictedClass = prediction_class[0];

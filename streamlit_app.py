@@ -624,7 +624,8 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         render_metric_card("Paper Status", str(latest.get("paper_status", "N/A")), latest.get("paper_reason_blocked", ""))
 
     risk_cols = st.columns(5)
-    paper_summary = report.get("paper_trading", {})
+    paper_summary = report.get("paper_trading", report.get("current_run_paper_trading", {}))
+    current_run_summary = report.get("current_run_paper_trading", {})
     with risk_cols[0]:
         render_metric_card("Paper Trades", str(paper_summary.get("trade_count", 0)), "Closed trades")
     with risk_cols[1]:
@@ -654,6 +655,21 @@ def render_dashboard_page(settings: dict[str, object]) -> None:
         render_metric_card("Wins", str(int(paper_summary.get("win_count", 0))), "closed winners")
     with capital_cols[4]:
         render_metric_card("Losses", str(int(paper_summary.get("loss_count", 0))), "closed losers")
+
+    frozen_summary = report.get("frozen_paper_trading", {})
+    current_run_trade_count = int(current_run_summary.get("trade_count", 0))
+    if frozen_summary:
+        st.caption(
+            "Paper cards above now use the saved closed-trade history across runs. "
+            f"The latest reconstructed window currently contributes {current_run_trade_count} closed trade(s)."
+        )
+        frozen_cols = st.columns(3)
+        with frozen_cols[0]:
+            render_metric_card("Frozen Trades", str(int(frozen_summary.get("trade_count", 0))), "saved closed trades")
+        with frozen_cols[1]:
+            render_metric_card("Frozen Capital", f"{float(frozen_summary.get('ending_equity', frozen_summary.get('starting_equity', 0.0))):.2f}", f"start {float(frozen_summary.get('starting_equity', 0.0)):.2f}")
+        with frozen_cols[2]:
+            render_metric_card("Frozen Net PnL", f"{float(frozen_summary.get('net_pnl_cash', 0.0)):+.2f}", "saved closed-trade history")
 
     saved_summary = build_trade_period_summary_table(final_trade_ledger)
     if not saved_summary.empty:
@@ -902,7 +918,7 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
     render_header(report)
     st.subheader("Paper Trading And Walk-Forward Evidence")
 
-    backtest = report.get("paper_trading", report.get("backtest", {}))
+    backtest = report.get("paper_trading", report.get("current_run_paper_trading", report.get("backtest", {})))
     metric_cols = st.columns(5)
     with metric_cols[0]:
         render_metric_card("Trades", str(backtest.get("trade_count", 0)), "Closed paper trades")
@@ -914,6 +930,16 @@ def render_backtest_walkforward_page(settings: dict[str, object]) -> None:
         render_metric_card("Expectancy R", f"{float(backtest.get('expectancy_r', 0.0)):.3f}", "Per paper trade")
     with metric_cols[4]:
         render_metric_card("Max Drawdown", f"{float(backtest.get('max_drawdown', 0.0)):.1%}", "Equity curve")
+
+    frozen_summary = report.get("frozen_paper_trading", {})
+    if frozen_summary:
+        frozen_metric_cols = st.columns(3)
+        with frozen_metric_cols[0]:
+            render_metric_card("Frozen Trades", str(int(frozen_summary.get("trade_count", 0))), "saved closed trades")
+        with frozen_metric_cols[1]:
+            render_metric_card("Frozen Capital", f"{float(frozen_summary.get('ending_equity', frozen_summary.get('starting_equity', 0.0))):.2f}", f"start {float(frozen_summary.get('starting_equity', 0.0)):.2f}")
+        with frozen_metric_cols[2]:
+            render_metric_card("Frozen Net PnL", f"{float(frozen_summary.get('net_pnl_cash', 0.0)):+.2f}", "saved closed-trade history")
 
     st.plotly_chart(build_equity_curve_figure(report), width="stretch")
 

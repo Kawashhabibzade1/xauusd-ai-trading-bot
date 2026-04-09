@@ -4,11 +4,14 @@ Minimal MetaTrader 5 client helpers for local live XAUUSD research flows.
 
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from pandas.errors import EmptyDataError, ParserError
 
 from pipeline_contract import display_path, ensure_parent_dir, resolve_repo_path
 from twelvedata_client import resolve_env_value
@@ -31,6 +34,17 @@ DEFAULT_MT5_EXPERTS_DIR = DEFAULT_MT5_PROGRAM_DIR / "MQL5" / "Experts"
 DEFAULT_MT5_METAEDITOR_EXE = DEFAULT_MT5_PROGRAM_DIR / "MetaEditor64.exe"
 DEFAULT_MT5_TERMINAL_EXE = DEFAULT_MT5_PROGRAM_DIR / "terminal64.exe"
 DEFAULT_MT5_WINE64 = Path("/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64")
+
+
+def _atomic_copy_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_target = target.with_name(f".{target.name}.tmp-{os.getpid()}-{time.time_ns()}")
+    try:
+        shutil.copy2(source, temp_target)
+        os.replace(temp_target, target)
+    finally:
+        if temp_target.exists():
+            temp_target.unlink()
 
 
 def _import_mt5() -> Any:
@@ -307,6 +321,8 @@ def load_exported_rates_csv(
     input_path: str | Path | None = None,
     symbol: str = "XAUUSD",
     timeframe: str = "M1",
+    max_read_attempts: int = 5,
+    retry_delay_seconds: float = 0.25,
 ) -> dict:
     from validate_merged_data import load_and_standardize
 
@@ -317,7 +333,27 @@ def load_exported_rates_csv(
             "Run the MT5 exporter first or set MT5_EXPORT_FILE to the correct CSV path."
         )
 
-    normalized = load_and_standardize(str(export_path))
+    last_error: Exception | None = None
+    normalized: pd.DataFrame | None = None
+    for attempt in range(max(1, int(max_read_attempts))):
+        try:
+            normalized = load_and_standardize(str(export_path))
+            break
+        except (EmptyDataError, ParserError, ValueError) as exc:
+            error_text = str(exc)
+            is_transient_null_parse = "contains nulls after parsing" in error_text or "Failed to parse" in error_text
+            if not isinstance(exc, (EmptyDataError, ParserError)) and not is_transient_null_parse:
+                raise
+            last_error = exc
+            if attempt >= max_read_attempts - 1:
+                break
+            time.sleep(max(0.0, float(retry_delay_seconds)))
+    if normalized is None:
+        raise RuntimeError(
+            f"MT5 export CSV at {export_path} could not be read after {max_read_attempts} attempts. "
+            "The exporter may be rewriting the file right now."
+        ) from last_error
+
     return _build_payload_from_normalized(
         normalized=normalized,
         symbol=normalize_mt5_symbol(symbol),
@@ -442,8 +478,7 @@ def sync_mt5_file_artifact(path_like: str | Path) -> dict[str, str]:
             "target": str(target),
             "relative": str(relative),
         }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
+    _atomic_copy_file(source, target)
     return {
         "source": str(source),
         "target": str(target),
