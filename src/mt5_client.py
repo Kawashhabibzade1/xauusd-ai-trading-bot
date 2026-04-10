@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ DEFAULT_MT5_ACCOUNT_SNAPSHOT_FILENAME = "config/mt5_account_snapshot.csv"
 DEFAULT_MT5_WINE_PREFIX = (
     Path.home() / "Library" / "Application Support" / "net.metaquotes.wine.metatrader5"
 )
+DEFAULT_MT5_APP_BUNDLE = Path("/Applications/MetaTrader 5.app")
 DEFAULT_MT5_PROGRAM_DIR = (
     DEFAULT_MT5_WINE_PREFIX / "drive_c" / "Program Files" / "MetaTrader 5"
 )
@@ -162,6 +164,10 @@ def get_mt5_terminal_exe() -> Path | None:
 
 def get_mt5_wine64() -> Path | None:
     return DEFAULT_MT5_WINE64 if DEFAULT_MT5_WINE64.exists() else None
+
+
+def get_mt5_app_bundle() -> Path | None:
+    return DEFAULT_MT5_APP_BUNDLE if DEFAULT_MT5_APP_BUNDLE.exists() else None
 
 
 def resolve_export_file_path(
@@ -563,6 +569,74 @@ def install_exporter_source(
     return {
         "source": str(source),
         "target": str(target_file),
+    }
+
+
+def restart_mt5_terminal(
+    relaunch_delay_seconds: float = 3.0,
+    settle_seconds: float = 5.0,
+) -> dict[str, Any]:
+    app_bundle = get_mt5_app_bundle()
+    if app_bundle is None:
+        raise RuntimeError("Could not find /Applications/MetaTrader 5.app on this machine.")
+
+    osascript = shutil.which("osascript")
+    open_cmd = shutil.which("open")
+    if osascript is None or open_cmd is None:
+        raise RuntimeError("Both osascript and open are required to restart MetaTrader 5 on macOS.")
+
+    bundle_id = "net.metaquotes.wine.MetaTrader5"
+    quit_result = subprocess.run(
+        [osascript, "-e", f'tell application id "{bundle_id}" to quit'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    time.sleep(max(float(relaunch_delay_seconds), 0.0))
+    launch_result = subprocess.run(
+        [open_cmd, "-a", str(app_bundle)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    time.sleep(max(float(settle_seconds), 0.0))
+    return {
+        "app_bundle": str(app_bundle),
+        "quit_returncode": int(quit_result.returncode),
+        "quit_stdout": quit_result.stdout.strip(),
+        "quit_stderr": quit_result.stderr.strip(),
+        "launch_returncode": int(launch_result.returncode),
+        "launch_stdout": launch_result.stdout.strip(),
+        "launch_stderr": launch_result.stderr.strip(),
+        "success": launch_result.returncode == 0,
+    }
+
+
+def wait_for_mt5_file(
+    relative_path: str,
+    timeout_seconds: float = 30.0,
+    poll_seconds: float = 1.0,
+) -> dict[str, Any]:
+    files_dir = get_mt5_files_dir()
+    if files_dir is None:
+        raise RuntimeError("Could not find the MT5 MQL5/Files directory on this machine.")
+
+    target = files_dir / relative_path
+    deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+    while time.monotonic() <= deadline:
+        if target.exists():
+            stat = target.stat()
+            return {
+                "path": str(target),
+                "exists": True,
+                "mtime": stat.st_mtime,
+                "size": stat.st_size,
+            }
+        time.sleep(max(float(poll_seconds), 0.1))
+
+    return {
+        "path": str(target),
+        "exists": target.exists(),
     }
 
 

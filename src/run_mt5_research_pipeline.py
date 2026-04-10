@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+from pandas.errors import EmptyDataError
 
 from filter_overlap import annotate_hunt_windows
 from mt5_client import (
@@ -36,6 +37,7 @@ from pipeline_contract import (
     DEFAULT_MT5_LIVE_MT5_VALIDATION_OUTPUT,
     DEFAULT_MT5_LIVE_RAW_INPUT,
     DEFAULT_MT5_LIVE_REPORT_PATH,
+    DEFAULT_MT5_EXECUTION_STATE_OUTPUT,
     DEFAULT_MT5_RESEARCH_CONFIG,
     DEFAULT_MT5_RESEARCH_FEEDBACK_OUTPUT,
     DEFAULT_MT5_RESEARCH_FINAL_LEDGER_OUTPUT,
@@ -64,9 +66,12 @@ MT5_FILES_ROOT = Path.home() / "Library" / "Application Support" / "net.metaquot
 MT5_EXPORTER_LIVE_PATH = MT5_FILES_ROOT / "xauusd_mt5_live.csv"
 MT5_BOT_TRADE_LOG_PATH = MT5_FILES_ROOT / "logs" / "xauusd_ai_trades.csv"
 MT5_ACCOUNT_SNAPSHOT_PATH = MT5_FILES_ROOT / "config" / "mt5_account_snapshot.csv"
+MT5_EXECUTION_STATE_PATH = MT5_FILES_ROOT / "config" / "mt5_execution_state.csv"
+BROKER_EVENT_ACTIONS = {"OPEN", "CLOSE", "BREAKEVEN"}
+BROKER_CLOSE_ACTION = "CLOSE"
 
 
-def build_mt5_runtime_health() -> dict[str, Any]:
+def build_mt5_runtime_health(stale_after_seconds: int = 120) -> dict[str, Any]:
     now_ts = time.time()
 
     def inspect(path: Path, stale_after_seconds: int) -> dict[str, Any]:
@@ -90,18 +95,487 @@ def build_mt5_runtime_health() -> dict[str, Any]:
             "status": "stale" if age_seconds > stale_after_seconds else "live",
         }
 
-    exporter = inspect(MT5_EXPORTER_LIVE_PATH, stale_after_seconds=30)
-    trade_log = inspect(MT5_BOT_TRADE_LOG_PATH, stale_after_seconds=180)
-    account_snapshot = inspect(MT5_ACCOUNT_SNAPSHOT_PATH, stale_after_seconds=30)
+    exporter = inspect(MT5_EXPORTER_LIVE_PATH, stale_after_seconds=stale_after_seconds)
+    trade_log = inspect(MT5_BOT_TRADE_LOG_PATH, stale_after_seconds=stale_after_seconds)
+    account_snapshot = inspect(MT5_ACCOUNT_SNAPSHOT_PATH, stale_after_seconds=stale_after_seconds)
+    execution_state = inspect(MT5_EXECUTION_STATE_PATH, stale_after_seconds=stale_after_seconds)
     return {
         "exporter": exporter,
         "bot_trade_log": trade_log,
         "account_snapshot": account_snapshot,
+        "ea_execution_state": execution_state,
         "summary": {
             "exporter_live": exporter["status"] == "live",
             "bot_log_live": trade_log["status"] == "live",
             "account_snapshot_live": account_snapshot["status"] == "live",
+            "ea_execution_state_live": execution_state["status"] == "live",
         },
+    }
+
+
+def read_optional_csv(path: Path) -> pd.DataFrame:
+    if not path.exists() or path.stat().st_size <= 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except EmptyDataError:
+        return pd.DataFrame()
+
+
+def parse_boolish(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return bool(value)
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    coerced = pd.to_numeric(value, errors="coerce")
+    if pd.isna(coerced):
+        return default
+    return float(coerced)
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    coerced = pd.to_numeric(value, errors="coerce")
+    if pd.isna(coerced):
+        return default
+    return int(float(coerced))
+
+
+def safe_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except TypeError:
+        pass
+    text = str(value).strip()
+    return text if text else default
+
+
+def parse_trade_log_note_metadata(note: Any) -> tuple[str, dict[str, str]]:
+    text = str(note or "").strip()
+    if "||meta:" not in text:
+        return text, {}
+
+    base_note, raw_meta = text.split("||meta:", 1)
+    metadata: dict[str, str] = {}
+    for item in raw_meta.split(";"):
+        part = item.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        metadata[key.strip()] = value.strip()
+    return base_note.strip(), metadata
+
+
+def load_mt5_broker_trade_log(path: Path = MT5_BOT_TRADE_LOG_PATH) -> pd.DataFrame:
+    frame = read_optional_csv(path)
+    if frame.empty:
+        return pd.DataFrame()
+
+    working = frame.copy()
+    for column in (
+        "action",
+        "direction",
+        "retcode_desc",
+        "note",
+    ):
+        if column not in working.columns:
+            working[column] = ""
+        working[column] = working[column].fillna("").astype(str)
+
+    if "time_utc" not in working.columns:
+        working["time_utc"] = ""
+    working["time_utc"] = pd.to_datetime(working["time_utc"], errors="coerce", utc=True)
+
+    parsed = working["note"].apply(parse_trade_log_note_metadata)
+    working["note_text"] = parsed.apply(lambda item: item[0])
+    working["directive_id"] = parsed.apply(lambda item: item[1].get("directive_id", ""))
+    working["note_position_ticket"] = pd.to_numeric(
+        parsed.apply(lambda item: item[1].get("position_ticket", "")),
+        errors="coerce",
+    )
+    working["exit_reason"] = parsed.apply(lambda item: item[1].get("exit_reason", ""))
+    working["realized_pnl_cash"] = pd.to_numeric(
+        parsed.apply(lambda item: item[1].get("realized_pnl_cash", "")),
+        errors="coerce",
+    )
+
+    numeric_columns = (
+        "confidence",
+        "volume",
+        "entry_price",
+        "stop_loss",
+        "take_profit",
+        "spread_points",
+        "retcode",
+    )
+    for column in numeric_columns:
+        if column not in working.columns:
+            working[column] = np.nan
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+
+    working["position_ticket"] = pd.to_numeric(working.get("position_ticket"), errors="coerce")
+    if working["position_ticket"].isna().all():
+        working["position_ticket"] = working["note_position_ticket"]
+    else:
+        working["position_ticket"] = working["position_ticket"].fillna(working["note_position_ticket"])
+
+    working["action"] = working["action"].str.upper()
+    working["direction"] = working["direction"].str.upper()
+    working["exit_reason"] = working["exit_reason"].fillna("").astype(str).str.upper()
+    return working.sort_values(by=["time_utc", "action"], ascending=[True, True]).reset_index(drop=True)
+
+
+def load_mt5_execution_state(path: Path = MT5_EXECUTION_STATE_PATH) -> dict[str, Any]:
+    frame = read_optional_csv(path)
+    if frame.empty:
+        return {}
+
+    latest = frame.iloc[-1].to_dict()
+    return {
+        "time_utc": safe_text(latest.get("time_utc", "")),
+        "ea_status": safe_text(latest.get("ea_status", "")),
+        "last_directive_id": safe_text(latest.get("last_directive_id", "")),
+        "last_action": safe_text(latest.get("last_action", "")),
+        "last_action_time_utc": safe_text(latest.get("last_action_time_utc", "")),
+        "position_state": safe_text(latest.get("position_state", "")),
+        "position_direction": safe_text(latest.get("position_direction", "")),
+        "position_volume": safe_float(latest.get("position_volume", 0.0)),
+        "position_entry": safe_float(latest.get("position_entry", 0.0)),
+        "position_sl": safe_float(latest.get("position_sl", 0.0)),
+        "position_tp": safe_float(latest.get("position_tp", 0.0)),
+        "position_ticket": safe_int(latest.get("position_ticket", 0)),
+        "block_reason": safe_text(latest.get("block_reason", "")),
+    }
+
+
+def runtime_health_blockers(mt5_runtime_health: dict[str, Any]) -> list[str]:
+    mapping = (
+        ("exporter", "EXPORTER"),
+        ("account_snapshot", "ACCOUNT_SNAPSHOT"),
+        ("ea_execution_state", "EA_HEARTBEAT"),
+    )
+    blockers: list[str] = []
+    for key, label in mapping:
+        status = dict(mt5_runtime_health.get(key, {}) or {})
+        if not status.get("exists", False):
+            blockers.append(f"{label}_MISSING")
+        elif bool(status.get("stale", True)):
+            blockers.append(f"{label}_STALE")
+    return blockers
+
+
+def build_snapshot_session_key(signal_time_text: str, session_name: str, timezone_name: str) -> tuple[str, pd.Timestamp]:
+    signal_time = pd.to_datetime(signal_time_text, errors="coerce", utc=True)
+    if pd.isna(signal_time):
+        return "", pd.NaT
+    session_label = str(session_name or "UNSPECIFIED").strip() or "UNSPECIFIED"
+    local_time = signal_time.tz_convert(timezone_name)
+    return f"{local_time.date()}|{session_label}", signal_time
+
+
+def session_has_stale_health(runtime_health: dict[str, Any]) -> bool:
+    required_components = ("exporter", "account_snapshot", "ea_execution_state")
+    for component in required_components:
+        payload = dict(runtime_health.get(component, {}) or {})
+        if not payload:
+            return True
+        if not payload.get("exists", False):
+            return True
+        if bool(payload.get("stale", True)):
+            return True
+    return False
+
+
+def recent_session_health(
+    snapshot_dir: str,
+    latest_signal_time: str,
+    latest_session_name: str,
+    hunt_timezone: str,
+    current_runtime_health: dict[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    session_index: dict[str, dict[str, Any]] = {}
+    snapshot_root = resolve_repo_path(snapshot_dir)
+    if snapshot_root.exists():
+        report_paths = sorted(snapshot_root.glob("*/report.json"))
+        for report_path in report_paths[-500:]:
+            try:
+                with report_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception:
+                continue
+
+            latest_signal = dict(payload.get("latest_signal", {}) or {})
+            session_key, signal_time = build_snapshot_session_key(
+                str(latest_signal.get("time", "")),
+                str(latest_signal.get("session_name", "")),
+                hunt_timezone,
+            )
+            if not session_key or pd.isna(signal_time):
+                continue
+
+            entry = session_index.setdefault(
+                session_key,
+                {
+                    "session_key": session_key,
+                    "session_name": str(latest_signal.get("session_name", "") or ""),
+                    "latest_signal_time": signal_time,
+                    "had_stale_health": False,
+                },
+            )
+            entry["latest_signal_time"] = max(pd.to_datetime(entry["latest_signal_time"], utc=True), signal_time)
+            entry["had_stale_health"] = bool(entry["had_stale_health"]) or session_has_stale_health(
+                dict(payload.get("mt5_runtime_health", {}) or {})
+            )
+
+    current_session_key, current_signal_time = build_snapshot_session_key(
+        latest_signal_time,
+        latest_session_name,
+        hunt_timezone,
+    )
+    if current_session_key and not pd.isna(current_signal_time):
+        entry = session_index.setdefault(
+            current_session_key,
+            {
+                "session_key": current_session_key,
+                "session_name": str(latest_session_name or ""),
+                "latest_signal_time": current_signal_time,
+                "had_stale_health": False,
+            },
+        )
+        entry["latest_signal_time"] = max(pd.to_datetime(entry["latest_signal_time"], utc=True), current_signal_time)
+        entry["had_stale_health"] = bool(entry["had_stale_health"]) or session_has_stale_health(current_runtime_health)
+
+    ordered = sorted(
+        session_index.values(),
+        key=lambda item: pd.to_datetime(item.get("latest_signal_time"), errors="coerce", utc=True),
+    )
+    recent = ordered[-max(0, int(limit)) :]
+    output: list[dict[str, Any]] = []
+    for item in recent:
+        latest_signal_time_value = pd.to_datetime(item.get("latest_signal_time"), errors="coerce", utc=True)
+        output.append(
+            {
+                "session_key": str(item.get("session_key", "")),
+                "session_name": str(item.get("session_name", "")),
+                "latest_signal_time": latest_signal_time_value.isoformat() if pd.notna(latest_signal_time_value) else "",
+                "had_stale_health": bool(item.get("had_stale_health", False)),
+            }
+        )
+    return output
+
+
+def promotion_floor_checks(summary: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = config.get("promotion", {}) or {}
+    trade_count = int(summary.get("trade_count", 0) or 0)
+    profit_factor = float(summary.get("profit_factor", 0.0) or 0.0)
+    precision = float(summary.get("precision", 0.0) or 0.0)
+    expectancy_r = float(summary.get("expectancy_r", 0.0) or 0.0)
+    max_drawdown = float(summary.get("max_drawdown", 0.0) or 0.0)
+    return [
+        {
+            "check": "paper_trade_count_floor",
+            "passed": trade_count >= int(thresholds.get("min_candidate_trades", 0) or 0),
+            "current": trade_count,
+            "required": int(thresholds.get("min_candidate_trades", 0) or 0),
+        },
+        {
+            "check": "paper_profit_factor_floor",
+            "passed": profit_factor >= float(thresholds.get("min_profit_factor", 0.0) or 0.0),
+            "current": profit_factor,
+            "required": float(thresholds.get("min_profit_factor", 0.0) or 0.0),
+        },
+        {
+            "check": "paper_precision_floor",
+            "passed": precision >= float(thresholds.get("min_precision", 0.0) or 0.0),
+            "current": precision,
+            "required": float(thresholds.get("min_precision", 0.0) or 0.0),
+        },
+        {
+            "check": "paper_expectancy_floor",
+            "passed": expectancy_r >= float(thresholds.get("min_expectancy_r", 0.0) or 0.0),
+            "current": expectancy_r,
+            "required": float(thresholds.get("min_expectancy_r", 0.0) or 0.0),
+        },
+        {
+            "check": "paper_drawdown_ceiling",
+            "passed": max_drawdown <= float(thresholds.get("max_drawdown", 0.0) or 0.0),
+            "current": max_drawdown,
+            "required": float(thresholds.get("max_drawdown", 0.0) or 0.0),
+        },
+    ]
+
+
+def latest_broker_event(trade_log: pd.DataFrame) -> dict[str, Any]:
+    if trade_log.empty:
+        return {}
+
+    events = trade_log.loc[
+        trade_log["action"].isin(BROKER_EVENT_ACTIONS) & trade_log["time_utc"].notna()
+    ].copy()
+    if events.empty:
+        return {}
+
+    latest = events.sort_values(by=["time_utc"], ascending=True).iloc[-1]
+    event_time = pd.to_datetime(latest.get("time_utc"), errors="coerce", utc=True)
+    return {
+        "event_key": "|".join(
+            [
+                event_time.isoformat() if pd.notna(event_time) else "",
+                str(latest.get("action", "") or ""),
+                str(safe_int(latest.get("position_ticket", 0))),
+                str(latest.get("exit_reason", "") or ""),
+            ]
+        ),
+        "time_utc": event_time.isoformat() if pd.notna(event_time) else "",
+        "action": str(latest.get("action", "") or ""),
+        "direction": str(latest.get("direction", "") or ""),
+        "entry_price": safe_float(latest.get("entry_price", 0.0)),
+        "stop_loss": safe_float(latest.get("stop_loss", 0.0)),
+        "take_profit": safe_float(latest.get("take_profit", 0.0)),
+        "volume": safe_float(latest.get("volume", 0.0)),
+        "position_ticket": safe_int(latest.get("position_ticket", 0)),
+        "directive_id": str(latest.get("directive_id", "") or ""),
+        "exit_reason": str(latest.get("exit_reason", "") or ""),
+        "realized_pnl_cash": safe_float(latest.get("realized_pnl_cash", 0.0)),
+        "note": str(latest.get("note_text", latest.get("note", "")) or ""),
+    }
+
+
+def build_broker_execution_summary(
+    trade_log: pd.DataFrame,
+    execution_state: dict[str, Any],
+    mt5_runtime_health: dict[str, Any],
+    paper_summary: dict[str, Any],
+    config: dict[str, Any],
+    snapshot_dir: str,
+    latest_signal_time: str,
+    latest_session_name: str,
+    account_balance: float,
+) -> dict[str, Any]:
+    broker_cfg = ((config.get("trading", {}) or {}).get("broker_autopilot", {}) or {})
+    hunt_timezone = str((config.get("trading", {}) or {}).get("hunt_timezone", "UTC"))
+    max_trades_per_day = int(broker_cfg.get("max_trades_per_utc_day", 3) or 3)
+    max_consecutive_losses = int(broker_cfg.get("max_consecutive_losses", 2) or 2)
+    max_daily_realized_loss_pct = float(broker_cfg.get("max_daily_realized_loss_pct", 0.01) or 0.01)
+    live_ready_min_demo_closed_trades = int(
+        broker_cfg.get("live_ready_min_demo_closed_trades", config.get("promotion", {}).get("min_candidate_trades", 30))
+        or 30
+    )
+    live_ready_recent_sessions = int(broker_cfg.get("live_ready_recent_sessions", 3) or 3)
+
+    now_utc = pd.Timestamp.now(tz="UTC")
+    today_utc = now_utc.date().isoformat()
+
+    opens = trade_log.loc[trade_log.get("action", pd.Series(dtype="object")).eq("OPEN")].copy() if not trade_log.empty else pd.DataFrame()
+    closes = trade_log.loc[trade_log.get("action", pd.Series(dtype="object")).eq(BROKER_CLOSE_ACTION)].copy() if not trade_log.empty else pd.DataFrame()
+    breakevens = trade_log.loc[trade_log.get("action", pd.Series(dtype="object")).eq("BREAKEVEN")].copy() if not trade_log.empty else pd.DataFrame()
+
+    today_open_count = 0
+    today_closed_pnl_cash = 0.0
+    if not opens.empty:
+        today_open_count = int((opens["time_utc"].dt.date.astype(str) == today_utc).sum())
+    if not closes.empty:
+        today_closed_pnl_cash = float(
+            closes.loc[closes["time_utc"].dt.date.astype(str) == today_utc, "realized_pnl_cash"].fillna(0.0).sum()
+        )
+
+    consecutive_losses = 0
+    if not closes.empty:
+        ordered_closes = closes.sort_values(by=["time_utc"], ascending=False)
+        for _, row in ordered_closes.iterrows():
+            realized = safe_float(row.get("realized_pnl_cash", 0.0))
+            if realized < 0.0:
+                consecutive_losses += 1
+                continue
+            break
+
+    runtime_blockers = runtime_health_blockers(mt5_runtime_health)
+    risk_blockers: list[str] = []
+    if today_open_count >= max_trades_per_day:
+        risk_blockers.append("BROKER_DAILY_TRADE_LIMIT")
+    if consecutive_losses >= max_consecutive_losses:
+        risk_blockers.append("BROKER_CONSECUTIVE_LOSS_LIMIT")
+    if account_balance > 0.0 and today_closed_pnl_cash <= -(account_balance * max_daily_realized_loss_pct):
+        risk_blockers.append("BROKER_DAILY_REALIZED_LOSS_LIMIT")
+
+    broker_blockers = runtime_blockers + risk_blockers
+    broker_trading_enabled = not broker_blockers
+    latest_event = latest_broker_event(trade_log)
+
+    recent_sessions = recent_session_health(
+        snapshot_dir=snapshot_dir,
+        latest_signal_time=latest_signal_time,
+        latest_session_name=latest_session_name,
+        hunt_timezone=hunt_timezone,
+        current_runtime_health=mt5_runtime_health,
+        limit=live_ready_recent_sessions,
+    )
+    stale_sessions = [session for session in recent_sessions if session.get("had_stale_health", False)]
+
+    promotion_checks = promotion_floor_checks(paper_summary, config)
+    promotion_blockers = [str(item["check"]) for item in promotion_checks if not item["passed"]]
+    promotion_thresholds_passed = not promotion_blockers
+
+    live_ready_blockers = list(promotion_blockers)
+    if int(len(closes)) < live_ready_min_demo_closed_trades:
+        live_ready_blockers.append("demo_closed_trade_count")
+    if len(recent_sessions) < live_ready_recent_sessions:
+        live_ready_blockers.append("recent_sessions")
+    elif stale_sessions:
+        live_ready_blockers.append("recent_stale_health")
+
+    current_position = {
+        "state": str(execution_state.get("position_state", "") or ""),
+        "direction": str(execution_state.get("position_direction", "") or ""),
+        "volume": safe_float(execution_state.get("position_volume", 0.0)),
+        "entry": safe_float(execution_state.get("position_entry", 0.0)),
+        "stop_loss": safe_float(execution_state.get("position_sl", 0.0)),
+        "take_profit": safe_float(execution_state.get("position_tp", 0.0)),
+        "ticket": safe_int(execution_state.get("position_ticket", 0)),
+    }
+
+    return {
+        "broker_trading_enabled": broker_trading_enabled,
+        "broker_block_reason": join_reasons(*broker_blockers),
+        "runtime_health_blockers": runtime_blockers,
+        "risk_blockers": risk_blockers,
+        "latest_event": latest_event,
+        "execution_state": execution_state,
+        "current_position": current_position,
+        "today": {
+            "utc_day": today_utc,
+            "open_trade_count": today_open_count,
+            "closed_trade_count": int((closes["time_utc"].dt.date.astype(str) == today_utc).sum()) if not closes.empty else 0,
+            "realized_pnl_cash": today_closed_pnl_cash,
+            "realized_loss_limit_cash": float(account_balance * max_daily_realized_loss_pct) if account_balance > 0.0 else 0.0,
+        },
+        "broker_trade_count": int(len(opens)),
+        "broker_closed_trade_count": int(len(closes)),
+        "broker_breakeven_count": int(len(breakevens)),
+        "consecutive_losses": consecutive_losses,
+        "risk_limits": {
+            "max_trades_per_utc_day": max_trades_per_day,
+            "max_consecutive_losses": max_consecutive_losses,
+            "max_daily_realized_loss_pct": max_daily_realized_loss_pct,
+        },
+        "promotion_thresholds_passed": promotion_thresholds_passed,
+        "promotion_checks": promotion_checks,
+        "promotion_blockers": promotion_blockers,
+        "live_ready": not live_ready_blockers,
+        "live_ready_blockers": live_ready_blockers,
+        "live_ready_requirements": {
+            "min_demo_closed_trades": live_ready_min_demo_closed_trades,
+            "recent_sessions": live_ready_recent_sessions,
+        },
+        "recent_session_health": recent_sessions,
     }
 
 
@@ -196,7 +670,7 @@ def drop_latest_live_bar(
 
 def write_csv_atomically(frame: pd.DataFrame, output_path: str | Path, **kwargs: Any) -> Path:
     output_file = ensure_parent_dir(output_path)
-    temp_output = output_file.with_name(f".{output_file.name}.tmp-{os.getpid()}-{pd.Timestamp.utcnow().value}")
+    temp_output = output_file.with_name(f".{output_file.name}.tmp-{os.getpid()}-{pd.Timestamp.now(tz='UTC').value}")
     try:
         frame.to_csv(temp_output, **kwargs)
         os.replace(temp_output, output_file)
@@ -1085,7 +1559,11 @@ def build_learning_status(feedback: pd.DataFrame, config: dict[str, Any]) -> dic
     }
 
 
-def build_trade_directive_frame(predictions: pd.DataFrame, config: dict[str, Any]) -> pd.DataFrame:
+def build_trade_directive_frame(
+    predictions: pd.DataFrame,
+    config: dict[str, Any],
+    broker_execution: dict[str, Any] | None = None,
+) -> pd.DataFrame:
     columns = [
         "epoch_utc",
         "time_utc",
@@ -1110,10 +1588,14 @@ def build_trade_directive_frame(predictions: pd.DataFrame, config: dict[str, Any
         "position_sizing_mode",
         "account_balance_snapshot",
         "assumed_contract_size",
+        "directive_id",
+        "broker_trading_enabled",
+        "broker_block_reason",
     ]
     if predictions.empty:
         return pd.DataFrame(columns=columns)
     trading_cfg = config.get("trading", {})
+    broker_state = dict(broker_execution or {})
     threshold = float(config.get("ensemble", {}).get("confidence_threshold", 0.46))
     ignored_blockers = {"H60_NOT_CONFIRMED", "NEGATIVE_EV"}
     latest_prediction_time = pd.to_datetime(predictions["time"], errors="coerce", utc=True).max()
@@ -1184,6 +1666,14 @@ def build_trade_directive_frame(predictions: pd.DataFrame, config: dict[str, Any
                 risk_cash = 0.0
 
         epoch_utc = int(signal_time.timestamp()) if pd.notna(signal_time) else 0
+        directive_trade = execution_trade if execution_trade in {"LONG", "SHORT"} else str(latest.get("recommended_trade", "")).strip().upper()
+        directive_id = "|".join(
+            [
+                str(epoch_utc),
+                directive_trade or "WATCH",
+                str(latest.get("session_name", "") or ""),
+            ]
+        )
         return {
             "epoch_utc": epoch_utc,
             "time_utc": str(latest.get("time", "")),
@@ -1208,6 +1698,9 @@ def build_trade_directive_frame(predictions: pd.DataFrame, config: dict[str, Any
             "position_sizing_mode": str(latest.get("position_sizing_mode", "equity_risk")),
             "account_balance_snapshot": float(account_balance_snapshot or 0.0),
             "assumed_contract_size": float(assumed_contract_size or 0.0),
+            "directive_id": directive_id,
+            "broker_trading_enabled": bool(broker_state.get("broker_trading_enabled", True)),
+            "broker_block_reason": str(broker_state.get("broker_block_reason", "") or ""),
         }
 
     evaluated_rows = [build_directive_row(predictions.iloc[index]) for index in range(len(predictions))]
@@ -1717,6 +2210,7 @@ def build_report(
     live_report: dict[str, Any],
     live_account_context: dict[str, Any] | None,
     mt5_runtime_health: dict[str, Any],
+    broker_execution: dict[str, Any],
     predictions: pd.DataFrame,
     overlays: dict[str, Any],
     paper_ledger: pd.DataFrame,
@@ -1847,6 +2341,9 @@ def build_report(
         "paper_trading": paper_summary,
         "backtest": paper_summary,
         "learning": learning_status,
+        "broker_execution": broker_execution,
+        "live_ready": bool(broker_execution.get("live_ready", False)),
+        "live_ready_blockers": [str(value) for value in broker_execution.get("live_ready_blockers", [])],
         "manual_override": {
             "enabled": bool(manual_override.get("enabled", False)),
             "scope": str(manual_override.get("scope", "paper_only")),
@@ -1863,7 +2360,7 @@ def build_report(
             "trade_setup_source": "paper_trade_directive",
             "learning_source": "paper_trading_only",
             "streamlit_scope": "paper_research_only",
-            "ingests_mt5_broker_trades": False,
+            "ingests_mt5_broker_trades": True,
             "requires_trade_directive": True,
             "broker_mirror_trigger": "latest directive row with gate_status=READY and paper_status=SIGNAL_READY",
             "trade_directive_synced_targets": [],
@@ -1891,6 +2388,7 @@ def build_report(
             "trade_history_output": display_path(trade_history_output),
             "final_trade_ledger_output": display_path(final_ledger_output),
             "trade_directive_output": display_path(trade_directive_output),
+            "execution_state_output": display_path(DEFAULT_MT5_EXECUTION_STATE_OUTPUT),
             "feedback_output": display_path(feedback_output),
             "learning_status_output": display_path(learning_status_output),
             "report_output": display_path(report_output),
@@ -1973,8 +2471,30 @@ def write_outputs(
     report.setdefault("dataset_summary", {})["saved_history_rows"] = int(len(trade_history))
     report["dataset_summary"]["paper_trade_rows"] = int(len(final_trade_ledger))
     report["dataset_summary"]["current_run_paper_trade_rows"] = int(len(paper_ledger))
+    refreshed_broker_execution = build_broker_execution_summary(
+        trade_log=load_mt5_broker_trade_log(),
+        execution_state=load_mt5_execution_state(),
+        mt5_runtime_health=report.get("mt5_runtime_health", {}) or {},
+        paper_summary=final_summary,
+        config=config_payload,
+        snapshot_dir=snapshot_dir,
+        latest_signal_time=str(report.get("latest_signal", {}).get("time", "") or ""),
+        latest_session_name=str(report.get("latest_signal", {}).get("session_name", "") or ""),
+        account_balance=float((report.get("mt5_account", {}) or {}).get("balance", 0.0) or 0.0),
+    )
+    report["broker_execution"] = refreshed_broker_execution
+    report.setdefault("execution_policy", {})["broker_trading_enabled"] = bool(
+        refreshed_broker_execution.get("broker_trading_enabled", False)
+    )
+    report.setdefault("execution_policy", {})["broker_block_reason"] = str(
+        refreshed_broker_execution.get("broker_block_reason", "") or ""
+    )
     directive_source = pd.read_csv(predictions_output_path)
-    trade_directive = build_trade_directive_frame(directive_source, config_payload)
+    trade_directive = build_trade_directive_frame(
+        directive_source,
+        config_payload,
+        broker_execution=refreshed_broker_execution,
+    )
     write_csv_atomically(trade_directive, trade_directive_output, index=False)
     synced_directive_targets: list[str] = []
     sync_error = ""
@@ -2031,6 +2551,7 @@ def run_mt5_research_pipeline(
     skip_backtest: bool = False,
 ) -> dict[str, Any]:
     config_payload = load_config(config)
+    broker_cfg = ((config_payload.get("trading", {}) or {}).get("broker_autopilot", {}) or {})
     live_account_context = load_live_account_context(
         symbol=symbol,
         terminal_env=terminal_env,
@@ -2038,7 +2559,9 @@ def run_mt5_research_pipeline(
         password_env=password_env,
         server_env=server_env,
     )
-    mt5_runtime_health = build_mt5_runtime_health()
+    mt5_runtime_health = build_mt5_runtime_health(
+        stale_after_seconds=int(broker_cfg.get("health_stale_after_seconds", 120) or 120)
+    )
     snapshot_timestamp = pd.Timestamp.now(tz="UTC")
     snapshot_created_at = snapshot_timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
     snapshot_run_id = snapshot_timestamp.strftime("%Y%m%dT%H%M%S%fZ")
@@ -2086,10 +2609,22 @@ def run_mt5_research_pipeline(
     feedback = build_learning_feedback(predictions, paper_ledger)
     learning_status = build_learning_status(feedback, config_payload)
     json_dump(manual_override, manual_override_output)
+    broker_execution = build_broker_execution_summary(
+        trade_log=load_mt5_broker_trade_log(),
+        execution_state=load_mt5_execution_state(),
+        mt5_runtime_health=mt5_runtime_health,
+        paper_summary=paper_summary,
+        config=config_payload,
+        snapshot_dir=snapshot_dir,
+        latest_signal_time=str(predictions.iloc[-1]["time"]) if not predictions.empty else "",
+        latest_session_name=str(predictions.iloc[-1]["session_name"]) if not predictions.empty else "",
+        account_balance=float((live_account_context or {}).get("balance", 0.0) or 0.0),
+    )
     report = build_report(
         live_report=live_report,
         live_account_context=live_account_context,
         mt5_runtime_health=mt5_runtime_health,
+        broker_execution=broker_execution,
         predictions=predictions,
         overlays=overlays,
         paper_ledger=paper_ledger,

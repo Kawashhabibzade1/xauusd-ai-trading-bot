@@ -96,6 +96,13 @@ trading:
     max_trades_per_day: 15
     daily_loss_streak_stop: 3
     max_holding_bars: 60
+  broker_autopilot:
+    health_stale_after_seconds: 120
+    max_trades_per_utc_day: 3
+    max_consecutive_losses: 2
+    max_daily_realized_loss_pct: 0.01
+    live_ready_min_demo_closed_trades: 30
+    live_ready_recent_sessions: 3
 
 learning:
   batch_min_closed_trades: 30

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Andy Warui"
 #property link      "https://github.com/andywarui/xauusd-ai-trading-bot"
-#property version   "1.304"
+#property version   "1.305"
 #property description "Validation-first AI bot for XAUUSD using a LightGBM ONNX model with demo-only execution mode"
 
 #include <Trade/Trade.mqh>
@@ -46,13 +46,27 @@ int            g_hATR14 = INVALID_HANDLE;
 datetime       g_lastAwaitingBarUtc = 0;
 string         g_lastAwaitingMessage = "";
 datetime       g_lastConsumedDirectiveUtc = 0;
+string         g_lastConsumedDirectiveId = "";
 double         g_activeTradeTp1 = 0.0;
 double         g_activeTradeEntry = 0.0;
+double         g_activeTradeStopLoss = 0.0;
+double         g_activeTradeTakeProfit = 0.0;
+double         g_activeTradeVolume = 0.0;
 bool           g_activeTradeBreakevenDone = false;
 int            g_activeTradeDirection = 0;
 double         g_activeTradeRiskDistance = 0.0;
+ulong          g_activePositionTicket = 0;
+long           g_activePositionIdentifier = 0;
 datetime       g_lastBreakevenDebugUtc = 0;
 string         g_lastBreakevenDebugNote = "";
+string         g_executionStatus = "INIT";
+string         g_lastAction = "";
+datetime       g_lastActionTimeUtc = 0;
+string         g_lastDirectiveId = "";
+string         g_activeDirectiveId = "";
+string         g_lastExecutionBlockReason = "";
+long           g_closeReasonHintPositionIdentifier = 0;
+string         g_closeReasonHint = "";
 CTrade         ExtTrade;
 CFeatureEngine ExtFeatureEngine;
 
@@ -63,8 +77,9 @@ CFeatureEngine ExtFeatureEngine;
 #define VALIDATION_FILE "config\\validation_set.csv"
 #define TRADE_DIRECTIVE_FILE "config\\mt5_trade_directive.csv"
 #define ACCOUNT_SNAPSHOT_FILE "config\\mt5_account_snapshot.csv"
+#define EXECUTION_STATE_FILE "config\\mt5_execution_state.csv"
 #define LIVE_MODEL_FILE "models\\xauusd_ai_mt5_live.onnx"
-#define BOT_VERSION "1.304"
+#define BOT_VERSION "1.305"
 
 struct TradeDirective
   {
@@ -85,6 +100,9 @@ struct TradeDirective
    string position_sizing_mode;
    double account_balance_snapshot;
    double assumed_contract_size;
+   string directive_id;
+   bool broker_trading_enabled;
+   string broker_block_reason;
   };
 
 string ResolveModelName()
@@ -243,6 +261,90 @@ void WriteAccountSnapshot()
    FileClose(handle);
   }
 
+string BoolToString(bool value)
+  {
+   return (value ? "true" : "false");
+  }
+
+bool ParseCsvBool(string value)
+  {
+   string normalized = value;
+   StringTrimLeft(normalized);
+   StringTrimRight(normalized);
+   StringToLower(normalized);
+   return (normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "y" || normalized == "on");
+  }
+
+string ResolveDirectiveId(const TradeDirective &directive)
+  {
+   if(directive.directive_id != "")
+      return directive.directive_id;
+   return StringFormat("%I64d|%s", (long)directive.time_utc, directive.recommended_trade);
+  }
+
+string ComposeLogNote(
+   string base_note,
+   string directive_id = "",
+   ulong position_ticket = 0,
+   string exit_reason = "",
+   bool include_realized_pnl = false,
+   double realized_pnl_cash = 0.0
+)
+  {
+   string meta = "";
+   if(directive_id != "")
+      meta = "directive_id=" + directive_id;
+   if(position_ticket > 0)
+     {
+      if(meta != "")
+         meta += ";";
+      meta += "position_ticket=" + (string)position_ticket;
+     }
+   if(exit_reason != "")
+     {
+      if(meta != "")
+         meta += ";";
+      meta += "exit_reason=" + exit_reason;
+     }
+   if(include_realized_pnl)
+     {
+      if(meta != "")
+         meta += ";";
+      meta += "realized_pnl_cash=" + DoubleToString(realized_pnl_cash, 2);
+     }
+   if(meta == "")
+      return base_note;
+   if(base_note == "")
+      return "meta||meta:" + meta;
+   return base_note + "||meta:" + meta;
+  }
+
+void RecordExecutionAction(string status, string action, string directive_id, string block_reason)
+  {
+   if(status != "")
+      g_executionStatus = status;
+   if(action != "")
+     {
+      g_lastAction = action;
+      g_lastActionTimeUtc = TimeGMT();
+     }
+   if(directive_id != "" || action != "")
+      g_lastDirectiveId = directive_id;
+   g_lastExecutionBlockReason = block_reason;
+  }
+
+void SetCloseReasonHint(long position_identifier, string reason)
+  {
+   g_closeReasonHintPositionIdentifier = position_identifier;
+   g_closeReasonHint = reason;
+  }
+
+void ClearCloseReasonHint()
+  {
+   g_closeReasonHintPositionIdentifier = 0;
+   g_closeReasonHint = "";
+  }
+
 void LogAwaitingCondition(datetime bar_time_utc, string message)
   {
    if(g_lastAwaitingBarUtc == bar_time_utc && g_lastAwaitingMessage == message)
@@ -397,6 +499,263 @@ int CountManagedPositions(ulong &ticket, long &position_type)
    return count;
   }
 
+void WriteExecutionState()
+  {
+   FolderCreate("config");
+   int handle = FileOpen(EXECUTION_STATE_FILE, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+   if(handle == INVALID_HANDLE)
+      return;
+
+   ulong ticket = 0;
+   long position_type = -1;
+   int managed_positions = CountManagedPositions(ticket, position_type);
+   string position_state = "FLAT";
+   string position_direction = "HOLD";
+   double position_volume = 0.0;
+   double position_entry = 0.0;
+   double position_sl = 0.0;
+   double position_tp = 0.0;
+   ulong position_ticket = 0;
+
+   if(managed_positions == 1 && PositionSelectByTicket(ticket))
+     {
+      position_state = "OPEN";
+      position_direction = PositionTypeToString(position_type);
+      position_volume = PositionGetDouble(POSITION_VOLUME);
+      position_entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      position_sl = PositionGetDouble(POSITION_SL);
+      position_tp = PositionGetDouble(POSITION_TP);
+      position_ticket = ticket;
+     }
+   else if(managed_positions > 1)
+     {
+      position_state = "MULTIPLE";
+      position_direction = "MIXED";
+      position_ticket = ticket;
+     }
+
+   string ea_status = g_executionStatus;
+   if(ea_status == "" || ea_status == "INIT")
+      ea_status = (managed_positions == 1 ? "POSITION_OPEN" : "IDLE");
+   else if(managed_positions == 1 && ea_status == "RUNNING")
+      ea_status = "POSITION_OPEN";
+   else if(managed_positions > 1)
+      ea_status = "ERROR";
+
+   string last_directive_id = g_lastDirectiveId;
+   if(last_directive_id == "" && g_activeDirectiveId != "")
+      last_directive_id = g_activeDirectiveId;
+
+   FileWrite(
+      handle,
+      "time_utc",
+      "ea_status",
+      "last_directive_id",
+      "last_action",
+      "last_action_time_utc",
+      "position_state",
+      "position_direction",
+      "position_volume",
+      "position_entry",
+      "position_sl",
+      "position_tp",
+      "position_ticket",
+      "block_reason"
+   );
+   FileWrite(
+      handle,
+      TimeToString(TimeGMT(), TIME_DATE | TIME_SECONDS),
+      ea_status,
+      last_directive_id,
+      g_lastAction,
+      (g_lastActionTimeUtc > 0 ? TimeToString(g_lastActionTimeUtc, TIME_DATE | TIME_SECONDS) : ""),
+      position_state,
+      position_direction,
+      DoubleToString(position_volume, 2),
+      DoubleToString(position_entry, _Digits),
+      DoubleToString(position_sl, _Digits),
+      DoubleToString(position_tp, _Digits),
+      (string)position_ticket,
+      g_lastExecutionBlockReason
+   );
+   FileClose(handle);
+  }
+
+bool LoadLatestCloseDealForPosition(
+   long position_identifier,
+   ulong &deal_ticket,
+   datetime &deal_time,
+   double &deal_price,
+   double &deal_volume,
+   double &realized_pnl_cash,
+   long &deal_reason
+)
+  {
+   deal_ticket = 0;
+   deal_time = 0;
+   deal_price = 0.0;
+   deal_volume = 0.0;
+   realized_pnl_cash = 0.0;
+   deal_reason = -1;
+
+   datetime history_from = TimeCurrent() - (7 * 24 * 60 * 60);
+   datetime history_to = TimeCurrent() + 60;
+   if(!HistorySelect(history_from, history_to))
+      return false;
+
+   for(int index = HistoryDealsTotal() - 1; index >= 0; index--)
+     {
+      ulong current_deal_ticket = HistoryDealGetTicket(index);
+      if(current_deal_ticket == 0)
+         continue;
+      if(HistoryDealGetString(current_deal_ticket, DEAL_SYMBOL) != _Symbol)
+         continue;
+      if((int)HistoryDealGetInteger(current_deal_ticket, DEAL_MAGIC) != InpMagicNumber)
+         continue;
+      if(position_identifier > 0 && (long)HistoryDealGetInteger(current_deal_ticket, DEAL_POSITION_ID) != position_identifier)
+         continue;
+
+      long entry_type = HistoryDealGetInteger(current_deal_ticket, DEAL_ENTRY);
+      if(entry_type != DEAL_ENTRY_OUT && entry_type != DEAL_ENTRY_OUT_BY && entry_type != DEAL_ENTRY_INOUT)
+         continue;
+
+      deal_ticket = current_deal_ticket;
+      deal_time = (datetime)HistoryDealGetInteger(current_deal_ticket, DEAL_TIME);
+      deal_price = HistoryDealGetDouble(current_deal_ticket, DEAL_PRICE);
+      deal_volume = HistoryDealGetDouble(current_deal_ticket, DEAL_VOLUME);
+      deal_reason = HistoryDealGetInteger(current_deal_ticket, DEAL_REASON);
+      realized_pnl_cash =
+         HistoryDealGetDouble(current_deal_ticket, DEAL_PROFIT) +
+         HistoryDealGetDouble(current_deal_ticket, DEAL_SWAP) +
+         HistoryDealGetDouble(current_deal_ticket, DEAL_COMMISSION);
+      return true;
+     }
+
+   return false;
+  }
+
+string InferCloseReason(long deal_reason, string reason_hint)
+  {
+   if(reason_hint != "")
+      return reason_hint;
+   if(deal_reason == DEAL_REASON_TP)
+      return "TAKE_PROFIT";
+   if(deal_reason == DEAL_REASON_SL)
+     {
+      if(g_activeTradeBreakevenDone)
+         return "BREAKEVEN_AFTER_TP1";
+      return "STOP_LOSS";
+     }
+   return "MANUAL_OR_UNKNOWN";
+  }
+
+void LogManagedPositionClosure(string reason_hint = "")
+  {
+   if(g_activePositionTicket == 0 && g_activePositionIdentifier == 0 && g_activeTradeEntry <= 0.0)
+     {
+      ResetManagedTradeState();
+      ClearCloseReasonHint();
+      return;
+     }
+
+   ulong close_deal_ticket = 0;
+   datetime close_time = 0;
+   double close_price = 0.0;
+   double close_volume = 0.0;
+   double realized_pnl_cash = 0.0;
+   long deal_reason = -1;
+   string exit_reason = reason_hint;
+
+   bool has_close_deal = LoadLatestCloseDealForPosition(
+      g_activePositionIdentifier,
+      close_deal_ticket,
+      close_time,
+      close_price,
+      close_volume,
+      realized_pnl_cash,
+      deal_reason
+   );
+
+   if(exit_reason == "")
+      exit_reason = InferCloseReason(deal_reason, reason_hint);
+
+   AppendTradeLog(
+      (has_close_deal ? ToUtc(close_time) : TimeGMT()),
+      "CLOSE",
+      DirectionToString(g_activeTradeDirection),
+      0.0,
+      (close_volume > 0.0 ? close_volume : g_activeTradeVolume),
+      g_activeTradeEntry,
+      g_activeTradeStopLoss,
+      g_activeTradeTakeProfit,
+      0.0,
+      0,
+      "",
+      ComposeLogNote(
+         (has_close_deal ? "position_closed" : "position_closed_history_missing"),
+         g_activeDirectiveId,
+         g_activePositionTicket,
+         exit_reason,
+         has_close_deal,
+         realized_pnl_cash
+      )
+   );
+
+   RecordExecutionAction("IDLE", "CLOSE", g_activeDirectiveId, "");
+   ResetManagedTradeState();
+   ClearCloseReasonHint();
+  }
+
+void TrackManagedPositionLifecycle()
+  {
+   ulong ticket = 0;
+   long position_type = -1;
+   int managed_positions = CountManagedPositions(ticket, position_type);
+
+   if((g_activePositionIdentifier > 0 || g_activePositionTicket > 0) && managed_positions <= 1)
+     {
+      bool tracked_position_still_open = false;
+      if(managed_positions == 1 && PositionSelectByTicket(ticket))
+        {
+         long current_identifier = PositionGetInteger(POSITION_IDENTIFIER);
+         tracked_position_still_open =
+            (current_identifier > 0 && current_identifier == g_activePositionIdentifier) ||
+            (g_activePositionTicket > 0 && ticket == g_activePositionTicket);
+        }
+
+      if(!tracked_position_still_open)
+        {
+         string reason_hint = "";
+         if(g_closeReasonHintPositionIdentifier > 0 && g_closeReasonHintPositionIdentifier == g_activePositionIdentifier)
+            reason_hint = g_closeReasonHint;
+         LogManagedPositionClosure(reason_hint);
+        }
+     }
+
+   if(managed_positions == 1 && PositionSelectByTicket(ticket))
+     {
+      long current_identifier = PositionGetInteger(POSITION_IDENTIFIER);
+      if(g_activePositionIdentifier != current_identifier || g_activePositionTicket != ticket || g_activeTradeEntry <= 0.0)
+         SeedManagedTradeStateFromPosition();
+      if(g_lastExecutionBlockReason == "multiple_managed_positions_open")
+         g_lastExecutionBlockReason = "";
+      if(g_executionStatus == "INIT" || g_executionStatus == "RUNNING" || g_executionStatus == "IDLE")
+         g_executionStatus = "POSITION_OPEN";
+     }
+   else if(managed_positions == 0)
+     {
+      if(g_executionStatus == "INIT" || g_executionStatus == "POSITION_OPEN")
+         g_executionStatus = "IDLE";
+      if(g_lastExecutionBlockReason == "multiple_managed_positions_open")
+         g_lastExecutionBlockReason = "";
+     }
+   else if(managed_positions > 1)
+     {
+      g_executionStatus = "ERROR";
+      g_lastExecutionBlockReason = "multiple_managed_positions_open";
+     }
+  }
+
 bool EnsureManagedPositionProtection(
    datetime bar_time_utc,
    int expected_direction,
@@ -502,9 +861,15 @@ void ResetManagedTradeState()
   {
    g_activeTradeTp1 = 0.0;
    g_activeTradeEntry = 0.0;
+   g_activeTradeStopLoss = 0.0;
+   g_activeTradeTakeProfit = 0.0;
+   g_activeTradeVolume = 0.0;
    g_activeTradeBreakevenDone = false;
    g_activeTradeDirection = 0;
    g_activeTradeRiskDistance = 0.0;
+   g_activePositionTicket = 0;
+   g_activePositionIdentifier = 0;
+   g_activeDirectiveId = "";
    g_lastBreakevenDebugUtc = 0;
    g_lastBreakevenDebugNote = "";
   }
@@ -563,15 +928,24 @@ void SeedManagedTradeStateFromPosition()
    if(managed_positions != 1 || !PositionSelectByTicket(ticket))
      {
       ResetManagedTradeState();
-      return;
+     return;
      }
 
    g_activeTradeEntry = PositionGetDouble(POSITION_PRICE_OPEN);
    g_activeTradeDirection = (position_type == POSITION_TYPE_BUY ? 1 : (position_type == POSITION_TYPE_SELL ? -1 : 0));
+   g_activeTradeStopLoss = PositionGetDouble(POSITION_SL);
+   g_activeTradeTakeProfit = PositionGetDouble(POSITION_TP);
+   g_activeTradeVolume = PositionGetDouble(POSITION_VOLUME);
+   g_activePositionTicket = ticket;
+   g_activePositionIdentifier = PositionGetInteger(POSITION_IDENTIFIER);
 
-   double current_stop = PositionGetDouble(POSITION_SL);
+   double current_stop = g_activeTradeStopLoss;
    g_activeTradeRiskDistance = MathAbs(g_activeTradeEntry - current_stop);
    g_activeTradeBreakevenDone = false;
+   if(g_activeTradeDirection > 0 && current_stop >= (g_activeTradeEntry - (_Point * 2.0)))
+      g_activeTradeBreakevenDone = true;
+   if(g_activeTradeDirection < 0 && current_stop <= (g_activeTradeEntry + (_Point * 2.0)))
+      g_activeTradeBreakevenDone = true;
 
    if(g_activeTradeTp1 > 0.0 && g_activeTradeDirection != 0)
       return;
@@ -579,7 +953,7 @@ void SeedManagedTradeStateFromPosition()
    TradeDirective directive;
    if(!LoadLatestTradeDirective(directive))
      {
-      double current_take_profit = PositionGetDouble(POSITION_TP);
+     double current_take_profit = PositionGetDouble(POSITION_TP);
       if(current_take_profit > 0.0)
          g_activeTradeTp1 = current_take_profit;
       return;
@@ -593,6 +967,8 @@ void SeedManagedTradeStateFromPosition()
          g_activeTradeTp1 = current_take_profit;
       return;
      }
+
+   g_activeDirectiveId = ResolveDirectiveId(directive);
 
    double current_take_profit = PositionGetDouble(POSITION_TP);
    double base_tp1_distance = MathAbs(directive.tp1 - directive.entry_price);
@@ -691,12 +1067,14 @@ void ManageOpenPositionBreakeven()
          0.0,
          ExtTrade.ResultRetcode(),
          ExtTrade.ResultRetcodeDescription(),
-         "tp1_profit_lock_failed"
+         ComposeLogNote("tp1_profit_lock_failed", g_activeDirectiveId, ticket)
       );
       return;
      }
 
    g_activeTradeBreakevenDone = true;
+   g_activeTradeStopLoss = protected_stop;
+   g_activeTradeTakeProfit = current_take_profit;
    AppendTradeLog(
       ToUtc(TimeCurrent()),
       "BREAKEVEN",
@@ -709,8 +1087,9 @@ void ManageOpenPositionBreakeven()
       0.0,
       ExtTrade.ResultRetcode(),
       ExtTrade.ResultRetcodeDescription(),
-      "tp1_profit_lock"
+      ComposeLogNote("tp1_profit_lock", g_activeDirectiveId, ticket)
    );
+   RecordExecutionAction("POSITION_OPEN", "BREAKEVEN", g_activeDirectiveId, "");
   }
 
 int DirectiveDirection(const TradeDirective &directive)
@@ -741,6 +1120,9 @@ bool LoadLatestTradeDirective(TradeDirective &directive)
    directive.position_sizing_mode = "";
    directive.account_balance_snapshot = 0.0;
    directive.assumed_contract_size = 0.0;
+   directive.directive_id = "";
+   directive.broker_trading_enabled = true;
+   directive.broker_block_reason = "";
 
    int handle = FileOpen(TRADE_DIRECTIVE_FILE, FILE_READ | FILE_CSV | FILE_ANSI | FILE_SHARE_READ | FILE_SHARE_WRITE, ',');
    if(handle == INVALID_HANDLE)
@@ -774,16 +1156,30 @@ bool LoadLatestTradeDirective(TradeDirective &directive)
       FileReadString(handle); // execution_scope
       FileReadString(handle); // learning_source
       FileReadString(handle); // streamlit_scope
+      double volume_lots = 0.0;
+      double risk_cash = 0.0;
+      string position_sizing_mode = "";
+      double account_balance_snapshot = 0.0;
+      double assumed_contract_size = 0.0;
+      string directive_id = "";
+      bool broker_trading_enabled = true;
+      string broker_block_reason = "";
       if(!FileIsLineEnding(handle))
-         directive.volume_lots = StringToDouble(FileReadString(handle));
+         volume_lots = StringToDouble(FileReadString(handle));
       if(!FileIsLineEnding(handle))
-         directive.risk_cash = StringToDouble(FileReadString(handle));
+         risk_cash = StringToDouble(FileReadString(handle));
       if(!FileIsLineEnding(handle))
-         directive.position_sizing_mode = FileReadString(handle);
+         position_sizing_mode = FileReadString(handle);
       if(!FileIsLineEnding(handle))
-         directive.account_balance_snapshot = StringToDouble(FileReadString(handle));
+         account_balance_snapshot = StringToDouble(FileReadString(handle));
       if(!FileIsLineEnding(handle))
-         directive.assumed_contract_size = StringToDouble(FileReadString(handle));
+         assumed_contract_size = StringToDouble(FileReadString(handle));
+      if(!FileIsLineEnding(handle))
+         directive_id = FileReadString(handle);
+      if(!FileIsLineEnding(handle))
+         broker_trading_enabled = ParseCsvBool(FileReadString(handle));
+      if(!FileIsLineEnding(handle))
+         broker_block_reason = FileReadString(handle);
 
       if(!skipped_header && epoch_field == "epoch_utc")
         {
@@ -809,6 +1205,14 @@ bool LoadLatestTradeDirective(TradeDirective &directive)
       directive.stop_loss = StringToDouble(stop_loss_field);
       directive.tp1 = StringToDouble(tp1_field);
       directive.tp2 = StringToDouble(tp2_field);
+      directive.volume_lots = volume_lots;
+      directive.risk_cash = risk_cash;
+      directive.position_sizing_mode = position_sizing_mode;
+      directive.account_balance_snapshot = account_balance_snapshot;
+      directive.assumed_contract_size = assumed_contract_size;
+      directive.directive_id = directive_id;
+      directive.broker_trading_enabled = broker_trading_enabled;
+      directive.broker_block_reason = broker_block_reason;
       found = true;
      }
 
@@ -983,9 +1387,11 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
 
    int direction = PredictionDirection(predicted_class);
    double confidence = MathMax((double)probabilities[0], MathMax((double)probabilities[1], (double)probabilities[2]));
+   string directive_id = "";
 
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
      {
+      g_executionStatus = "WAITING_PERMISSIONS";
       LogAwaitingCondition(
          bar_time_utc,
          StringFormat(
@@ -1004,6 +1410,7 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
      {
       if(!LoadLatestTradeDirective(directive))
         {
+         g_executionStatus = "WAITING_DIRECTIVE";
          LogAwaitingCondition(
             bar_time_utc,
             StringFormat(
@@ -1014,8 +1421,10 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
          return false;
         }
 
+      directive_id = ResolveDirectiveId(directive);
       if(directive.time_utc > bar_time_utc)
         {
+         g_executionStatus = "WAITING_DIRECTIVE";
          LogAwaitingCondition(
             bar_time_utc,
             StringFormat(
@@ -1029,9 +1438,27 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
       if(directive.time_utc < bar_time_utc)
         {
          int directive_age_seconds = (int)(bar_time_utc - directive.time_utc);
-         if(g_lastConsumedDirectiveUtc == directive.time_utc)
+         bool directive_consumed = false;
+         if(directive_id != "" && g_lastConsumedDirectiveId == directive_id)
+            directive_consumed = true;
+         if(!directive_consumed && directive_id == "" && g_lastConsumedDirectiveUtc == directive.time_utc)
+            directive_consumed = true;
+         if(directive_consumed)
            {
-            AppendTradeLog(bar_time_utc, "SKIP", DirectionToString(DirectiveDirection(directive)), directive.directional_confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "directive_already_consumed");
+            AppendTradeLog(
+               bar_time_utc,
+               "SKIP",
+               DirectionToString(DirectiveDirection(directive)),
+               directive.directional_confidence,
+               0.0,
+               0.0,
+               0.0,
+               0.0,
+               0.0,
+               0,
+               "",
+               ComposeLogNote("directive_already_consumed", directive_id)
+            );
             return true;
            }
          if(InpDirectiveMaxAgeBars > 0)
@@ -1042,6 +1469,7 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
             int max_age_seconds = MathMax(period_seconds, 1) * InpDirectiveMaxAgeBars;
             if(directive_age_seconds > max_age_seconds)
               {
+               g_executionStatus = "WAITING_DIRECTIVE";
                LogAwaitingCondition(
                   bar_time_utc,
                   StringFormat(
@@ -1072,7 +1500,44 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
          string directive_direction_name = DirectionToString(direction);
          if(direction == 0)
             directive_direction_name = "HOLD";
-         AppendTradeLog(bar_time_utc, "BLOCK", directive_direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", directive_block_reason);
+         AppendTradeLog(
+            bar_time_utc,
+            "BLOCK",
+            directive_direction_name,
+            confidence,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            "",
+            ComposeLogNote(directive_block_reason, directive_id)
+         );
+         RecordExecutionAction("BLOCKED", "BLOCK", directive_id, directive_block_reason);
+         return true;
+        }
+
+      if(!directive.broker_trading_enabled)
+        {
+         string broker_block_reason = directive.broker_block_reason;
+         if(broker_block_reason == "")
+            broker_block_reason = "broker_autopilot_disabled";
+         AppendTradeLog(
+            bar_time_utc,
+            "BLOCK",
+            DirectionToString(direction),
+            confidence,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            "",
+            ComposeLogNote(broker_block_reason, directive_id)
+         );
+         RecordExecutionAction("BLOCKED", "BLOCK", directive_id, broker_block_reason);
          return true;
         }
 
@@ -1097,22 +1562,68 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
    string direction_name = DirectionToString(direction);
    g_lastAwaitingBarUtc = 0;
    g_lastAwaitingMessage = "";
+   if(g_executionStatus == "WAITING_DIRECTIVE" || g_executionStatus == "WAITING_PERMISSIONS" || g_executionStatus == "BLOCKED")
+      g_executionStatus = "RUNNING";
+   if(!use_directive_levels || directive.broker_trading_enabled)
+      g_lastExecutionBlockReason = "";
 
    if(!IsDemoAccount())
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "demo_only_guard");
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0,
+         "",
+         ComposeLogNote("demo_only_guard", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, "demo_only_guard");
       return true;
      }
 
    if(!IsTradeModeAllowed(direction))
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "symbol_trade_mode_blocked");
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0,
+         "",
+         ComposeLogNote("symbol_trade_mode_blocked", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, "symbol_trade_mode_blocked");
       return true;
      }
 
    if(InpSessionTradeLimit > 0 && g_successfulTradeCount >= InpSessionTradeLimit)
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "session_trade_limit_reached");
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0,
+         "",
+         ComposeLogNote("session_trade_limit_reached", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, "session_trade_limit_reached");
       return true;
      }
 
@@ -1121,7 +1632,21 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
    int managed_positions = CountManagedPositions(position_ticket, position_type);
    if(managed_positions > 1)
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "multiple_managed_positions_open");
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0.0,
+         0,
+         "",
+         ComposeLogNote("multiple_managed_positions_open", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, "multiple_managed_positions_open");
       return true;
      }
 
@@ -1135,18 +1660,51 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
 
       if(existing_direction == direction)
         {
-         AppendTradeLog(bar_time_utc, "SKIP", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "existing_same_direction_position");
+         AppendTradeLog(
+            bar_time_utc,
+            "SKIP",
+            direction_name,
+            confidence,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            "",
+            ComposeLogNote("existing_same_direction_position", directive_id, position_ticket)
+         );
          return true;
         }
 
       if(!InpAllowSignalFlip)
         {
-         AppendTradeLog(bar_time_utc, "SKIP", direction_name, confidence, 0.0, 0.0, 0.0, 0.0, 0.0, 0, "", "opposite_position_open");
+         AppendTradeLog(
+            bar_time_utc,
+            "SKIP",
+            direction_name,
+            confidence,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0,
+            "",
+            ComposeLogNote("opposite_position_open", directive_id, position_ticket)
+         );
          return true;
         }
 
+      long closing_position_identifier = 0;
+      if(PositionSelectByTicket(position_ticket))
+        {
+         closing_position_identifier = PositionGetInteger(POSITION_IDENTIFIER);
+         SetCloseReasonHint(closing_position_identifier, "FLIP_CLOSE");
+        }
       if(!ExtTrade.PositionClose(position_ticket))
         {
+         ClearCloseReasonHint();
          AppendTradeLog(
             bar_time_utc,
             "CLOSE_REJECT",
@@ -1159,25 +1717,41 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
             0.0,
             ExtTrade.ResultRetcode(),
             ExtTrade.ResultRetcodeDescription(),
-            "flip_before_entry_failed"
+            ComposeLogNote("flip_before_entry_failed", directive_id, position_ticket, "FLIP_CLOSE")
          );
+         RecordExecutionAction("BLOCKED", "CLOSE_REJECT", directive_id, "flip_before_entry_failed");
          return true;
         }
-
-      AppendTradeLog(
-         bar_time_utc,
-         "CLOSE",
-         PositionTypeToString(position_type),
-         confidence,
-         0.0,
-         0.0,
-         0.0,
-         0.0,
-         0.0,
-         ExtTrade.ResultRetcode(),
-         ExtTrade.ResultRetcodeDescription(),
-         "flip_before_entry"
-      );
+      for(int attempt = 0; attempt < 10; attempt++)
+        {
+         TrackManagedPositionLifecycle();
+         if(g_closeReasonHintPositionIdentifier == 0)
+            break;
+         ulong remaining_ticket = 0;
+         long remaining_type = -1;
+         int remaining_positions = CountManagedPositions(remaining_ticket, remaining_type);
+         if(remaining_positions == 0)
+            break;
+         if(remaining_positions == 1 && PositionSelectByTicket(remaining_ticket))
+           {
+            long remaining_identifier = PositionGetInteger(POSITION_IDENTIFIER);
+            if(remaining_identifier != closing_position_identifier)
+               break;
+           }
+         Sleep(100);
+        }
+      if(g_closeReasonHintPositionIdentifier != 0)
+        {
+         g_executionStatus = "WAITING_FLIP_CLOSE";
+         LogAwaitingCondition(
+            bar_time_utc,
+            StringFormat(
+               "Waiting for opposite managed position to close before flip entry at %s",
+               TimeToString(bar_time_utc, TIME_DATE | TIME_SECONDS)
+            )
+         );
+         return false;
+        }
      }
 
    MqlTick tick;
@@ -1194,7 +1768,21 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
       levels_ready = BuildOrderLevels(direction, tick, entry_price, stop_loss, take_profit, spread_points, blocked_reason);
    if(!levels_ready)
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, entry_price, stop_loss, take_profit, spread_points, 0, "", blocked_reason);
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         0.0,
+         entry_price,
+         stop_loss,
+         take_profit,
+         spread_points,
+         0,
+         "",
+         ComposeLogNote(blocked_reason, directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, blocked_reason);
       return true;
      }
 
@@ -1221,7 +1809,21 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
         {
          if(sizing_reason == "")
             sizing_reason = "risk_based_sizing_failed";
-         AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, 0.0, entry_price, stop_loss, take_profit, spread_points, 0, "", sizing_reason);
+         AppendTradeLog(
+            bar_time_utc,
+            "BLOCK",
+            direction_name,
+            confidence,
+            0.0,
+            entry_price,
+            stop_loss,
+            take_profit,
+            spread_points,
+            0,
+            "",
+            ComposeLogNote(sizing_reason, directive_id)
+         );
+         RecordExecutionAction("BLOCKED", "BLOCK", directive_id, sizing_reason);
          return true;
         }
      }
@@ -1232,7 +1834,21 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
    double volume = NormalizeVolume(requested_volume);
    if(volume <= 0.0)
      {
-      AppendTradeLog(bar_time_utc, "BLOCK", direction_name, confidence, volume, entry_price, stop_loss, take_profit, spread_points, 0, "", "invalid_volume");
+      AppendTradeLog(
+         bar_time_utc,
+         "BLOCK",
+         direction_name,
+         confidence,
+         volume,
+         entry_price,
+         stop_loss,
+         take_profit,
+         spread_points,
+         0,
+         "",
+         ComposeLogNote("invalid_volume", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "BLOCK", directive_id, "invalid_volume");
       return true;
      }
 
@@ -1247,31 +1863,58 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
    else
       submitted = ExtTrade.Sell(volume, _Symbol, 0.0, stop_loss, take_profit, InpTradeComment);
 
-   AppendTradeLog(
-      bar_time_utc,
-      (submitted ? "OPEN" : "OPEN_REJECT"),
-      direction_name,
-      confidence,
-      volume,
-      entry_price,
-      stop_loss,
-      take_profit,
-      spread_points,
-      ExtTrade.ResultRetcode(),
-      ExtTrade.ResultRetcodeDescription(),
-      (submitted ? "order_submitted" : "order_failed")
-   );
-
    if(submitted)
      {
       EnsureManagedPositionProtection(bar_time_utc, direction, stop_loss, take_profit);
       if(use_directive_levels)
+        {
          g_lastConsumedDirectiveUtc = directive.time_utc;
-      g_activeTradeEntry = entry_price;
+         g_lastConsumedDirectiveId = directive_id;
+        }
+
+      ulong opened_ticket = 0;
+      long opened_type = -1;
+      CountManagedPositions(opened_ticket, opened_type);
+      if(opened_ticket > 0 && PositionSelectByTicket(opened_ticket))
+        {
+         g_activeTradeEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+         g_activeTradeStopLoss = PositionGetDouble(POSITION_SL);
+         g_activeTradeTakeProfit = PositionGetDouble(POSITION_TP);
+         g_activeTradeVolume = PositionGetDouble(POSITION_VOLUME);
+         g_activePositionTicket = opened_ticket;
+         g_activePositionIdentifier = PositionGetInteger(POSITION_IDENTIFIER);
+        }
+      else
+        {
+         g_activeTradeEntry = entry_price;
+         g_activeTradeStopLoss = stop_loss;
+         g_activeTradeTakeProfit = take_profit;
+         g_activeTradeVolume = volume;
+         g_activePositionTicket = 0;
+         g_activePositionIdentifier = 0;
+        }
+
       g_activeTradeTp1 = breakeven_trigger_price;
       g_activeTradeBreakevenDone = false;
       g_activeTradeDirection = direction;
+      g_activeTradeRiskDistance = MathAbs(g_activeTradeEntry - g_activeTradeStopLoss);
+      g_activeDirectiveId = directive_id;
       g_successfulTradeCount++;
+      AppendTradeLog(
+         bar_time_utc,
+         "OPEN",
+         direction_name,
+         confidence,
+         volume,
+         g_activeTradeEntry,
+         g_activeTradeStopLoss,
+         g_activeTradeTakeProfit,
+         spread_points,
+         ExtTrade.ResultRetcode(),
+         ExtTrade.ResultRetcodeDescription(),
+         ComposeLogNote("order_submitted", directive_id, g_activePositionTicket)
+      );
+      RecordExecutionAction("POSITION_OPEN", "OPEN", directive_id, "");
       PrintFormat(
          "Demo trade submitted: %s volume=%.2f entry=%.2f sl=%.2f tp=%.2f confidence=%.4f spread=%.1f successful_trade_count=%d",
          direction_name,
@@ -1286,6 +1929,26 @@ bool MaybeExecuteTrade(datetime bar_time_utc, long predicted_class, const float 
      }
    else
      {
+      if(use_directive_levels)
+        {
+         g_lastConsumedDirectiveUtc = directive.time_utc;
+         g_lastConsumedDirectiveId = directive_id;
+        }
+      AppendTradeLog(
+         bar_time_utc,
+         "OPEN_REJECT",
+         direction_name,
+         confidence,
+         volume,
+         entry_price,
+         stop_loss,
+         take_profit,
+         spread_points,
+         ExtTrade.ResultRetcode(),
+         ExtTrade.ResultRetcodeDescription(),
+         ComposeLogNote("order_failed", directive_id)
+      );
+      RecordExecutionAction("BLOCKED", "OPEN_REJECT", directive_id, ExtTrade.ResultRetcodeDescription());
       PrintFormat(
          "Demo trade rejected: %s retcode=%d (%s)",
          direction_name,
@@ -1482,6 +2145,9 @@ int OnInit()
       PrintFormat("This EA session is limited to %d successful demo trade(s).", InpSessionTradeLimit);
    if(InpEnableDemoTrading && InpRequireTradeDirective && !FileIsExist(TRADE_DIRECTIVE_FILE))
       Print("Trade directive file is not available yet. Keep the MT5 research worker running; the EA will wait for the paper-trade directive.");
+   g_executionStatus = "RUNNING";
+   TrackManagedPositionLifecycle();
+   WriteExecutionState();
    return INIT_SUCCEEDED;
   }
 
@@ -1504,7 +2170,9 @@ void OnDeinit(const int reason)
 void OnTick()
   {
    WriteAccountSnapshot();
+   TrackManagedPositionLifecycle();
    ManageOpenPositionBreakeven();
+   WriteExecutionState();
    datetime current_bar_open = iTime(_Symbol, PERIOD_CURRENT, 0);
    if(current_bar_open != g_lastBarOpenTime)
      {
@@ -1560,11 +2228,15 @@ void OnTick()
 
    if(g_hasPendingTrade && MaybeExecuteTrade(g_pendingTradeBarUtc, g_pendingPredictedClass, g_pendingProbabilities))
       g_hasPendingTrade = false;
+   TrackManagedPositionLifecycle();
+   WriteExecutionState();
   }
 
 void OnTimer()
   {
    WriteAccountSnapshot();
+   TrackManagedPositionLifecycle();
    ManageOpenPositionBreakeven();
+   WriteExecutionState();
   }
 //+------------------------------------------------------------------+

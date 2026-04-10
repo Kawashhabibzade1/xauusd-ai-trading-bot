@@ -181,10 +181,13 @@ Important:
 - keep this on a demo account first
 - enable `Algo Trading` in MT5
 - the EA writes signal logs to `logs\\xauusd_ai_signals.csv` and trade logs to `logs\\xauusd_ai_trades.csv`
+- the EA also writes `config\\mt5_execution_state.csv`, which exposes the heartbeat, last broker action, current managed position, and any active block reason
 - the EA follows the paper/research trade directive, so MT5 demo trades use the same gated setup source as the paper path
+- the Python worker now ingests the broker trade log, account snapshot, and execution-state heartbeat so the local report can show broker execution health beside paper status
+- Python-side broker autopilot guards can disable new demo entries automatically when exporter health goes stale, the EA heartbeat goes missing, daily broker trade caps are hit, or realized broker losses trip the configured limit
 - the EA blocks entries when the live market price drifts too far from the paper directive entry, so demo execution stays close to the mirrored paper setup
-- the EA caps demo order size at `0.01` lots and, with `InpSessionTradeLimit=1`, will place only one successful demo trade for this proof run
-- Streamlit and learning stay on the paper/research artifacts only; MT5 broker-side trade logs are not ingested there
+- the EA logs explicit broker-side `OPEN`, `CLOSE`, and `BREAKEVEN` events so questions like "is it still trading?" can be answered from one place
+- demo order size remains capped by `InpDemoMaxLotSize`, and `InpSessionTradeLimit` can still hard-limit how many successful demo entries a single EA session may place
 - this path is still experimental and should be validated in MT5 Strategy Tester before any non-demo use
 
 Verification checklist before first accepted order:
@@ -231,7 +234,8 @@ The local MT5 paper-trading stack writes its own cockpit artifacts here:
 - `data/live/research_mt5/xauusd_research_overlays.json`
 
 Important:
-- this is paper trading only; it does not place broker orders
+- the research cockpit remains paper-first, but it now ingests MT5 broker execution telemetry so demo broker state is visible beside paper status
+- broker execution remains demo-only in this pass; nothing here enables live-account orders automatically
 - the MT5 worker and the dashboard are local-runtime services, not Streamlit Cloud replacements
 - the top cards in the cockpit now follow the MT5 local report when `Live provider` is `MT5 Local` or `Auto`
 
@@ -545,5 +549,6 @@ mt5_expert_advisor/
 ## Known Gaps
 - Full retraining is not reproducible from the checked-in one-day sample dataset alone
 - No verified MT5 Strategy Tester report in-repo yet
-- No order execution or `RiskManager.mqh` yet
+- No in-repo proof yet that the new MT5 demo-autopilot flow compiles cleanly in MetaEditor and behaves as intended across all broker edge cases
+- No live-account rollout path in-repo; demo execution is intentional and still hard-locked on the EA side
 - Existing historical metrics in older artifacts should be treated as model-development outputs, not proof of MT5 live-readiness

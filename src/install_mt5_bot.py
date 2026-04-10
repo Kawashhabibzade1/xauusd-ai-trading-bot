@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from install_mt5_exporter import compile_exporter
-from mt5_client import get_mt5_experts_dir
+from mt5_client import get_mt5_experts_dir, restart_mt5_terminal, wait_for_mt5_file
 from pipeline_contract import resolve_repo_path
 
 
@@ -50,6 +50,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--relative-dir", default="OpenAI", help="Subdirectory inside MQL5/Experts.")
     parser.add_argument("--skip-compile", action="store_true", help="Only copy the bot sources without compiling them.")
+    parser.add_argument(
+        "--restart-terminal",
+        action="store_true",
+        help="Restart the macOS MetaTrader 5 app after a successful compile so the updated EA is reloaded.",
+    )
+    parser.add_argument(
+        "--wait-execution-state-seconds",
+        type=float,
+        default=0.0,
+        help="After restart, wait this many seconds for MQL5/Files/config/mt5_execution_state.csv to appear.",
+    )
     return parser.parse_args()
 
 
@@ -105,16 +116,49 @@ def main() -> None:
             if compile_result["stderr"]:
                 print(compile_result["stderr"])
 
+    restart_result = None
+    if args.restart_terminal:
+        if args.skip_compile:
+            print("Restart skipped because --skip-compile was used.")
+        elif not compile_result or not compile_result.get("success", False):
+            print("Restart skipped because compile did not finish successfully.")
+        else:
+            try:
+                restart_result = restart_mt5_terminal()
+            except Exception as exc:
+                print(f"Restart: failed ({exc})")
+            else:
+                print(f"MT5 restart success : {restart_result['success']}")
+                if restart_result["quit_stderr"]:
+                    print(f"Quit stderr        : {restart_result['quit_stderr']}")
+                if restart_result["launch_stderr"]:
+                    print(f"Launch stderr      : {restart_result['launch_stderr']}")
+
+    if args.wait_execution_state_seconds > 0:
+        try:
+            wait_result = wait_for_mt5_file(
+                "config/mt5_execution_state.csv",
+                timeout_seconds=args.wait_execution_state_seconds,
+            )
+        except Exception as exc:
+            print(f"Execution state wait: failed ({exc})")
+        else:
+            print(f"Execution state path : {wait_result['path']}")
+            print(f"Execution state seen : {wait_result['exists']}")
+            if wait_result.get("exists"):
+                print(f"Execution state size : {wait_result['size']}")
+
     print()
     print("Next in MT5:")
     print("  1. Run the live MT5 pipeline so the current ONNX model is generated and synced.")
     print("  2. Open Navigator -> Expert Advisors -> OpenAI")
-    print("  3. Attach XAUUSD_AI_Bot to an XAUUSD M1 chart on your demo account")
+    print("  3. Attach or reattach XAUUSD_AI_Bot to an XAUUSD M1 chart on your demo account")
     print("  4. Load these demo-safe EA inputs before you arm Algo Trading:")
     for key, value in DEMO_SAFE_INPUTS:
         print(f"     {key}={value}")
     print("  5. Keep the MT5 paper/research worker running so the trade directive stays fresh")
-    print("  6. Enable Algo Trading after the EA initializes cleanly")
+    print("  6. Confirm config/mt5_execution_state.csv starts updating after the EA initializes")
+    print("  7. Enable Algo Trading after the EA initializes cleanly")
 
 
 if __name__ == "__main__":

@@ -68,6 +68,9 @@ def run_cycle(report_output: str) -> dict:
     live_source = report.get("mt5_live_source", {})
     paper = report.get("paper_trading", {})
     learning = report.get("learning", {})
+    broker_execution = report.get("broker_execution", {}) or {}
+    latest_event = broker_execution.get("latest_event", {}) or {}
+    current_position = broker_execution.get("current_position", {}) or {}
     return {
         "last_run_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "report_output": report_output,
@@ -86,6 +89,22 @@ def run_cycle(report_output: str) -> dict:
         "learning_closed_trades": learning.get("closed_trades", 0),
         "learning_retrain_ready": learning.get("retrain_ready", False),
         "learning_blockers": learning.get("retrain_blockers", []),
+        "broker_trading_enabled": broker_execution.get("broker_trading_enabled", False),
+        "broker_block_reason": broker_execution.get("broker_block_reason", ""),
+        "broker_trade_count": broker_execution.get("broker_trade_count", 0),
+        "broker_closed_trade_count": broker_execution.get("broker_closed_trade_count", 0),
+        "broker_consecutive_losses": broker_execution.get("consecutive_losses", 0),
+        "broker_live_ready": broker_execution.get("live_ready", False),
+        "broker_live_ready_blockers": broker_execution.get("live_ready_blockers", []),
+        "broker_latest_event_key": latest_event.get("event_key", ""),
+        "broker_latest_event_action": latest_event.get("action", ""),
+        "broker_latest_event_time": latest_event.get("time_utc", ""),
+        "broker_latest_event_direction": latest_event.get("direction", ""),
+        "broker_latest_event_note": latest_event.get("note", ""),
+        "broker_latest_event_exit_reason": latest_event.get("exit_reason", ""),
+        "broker_latest_event_realized_pnl_cash": latest_event.get("realized_pnl_cash", 0.0),
+        "broker_position_state": current_position.get("state", ""),
+        "broker_position_direction": current_position.get("direction", ""),
     }
 
 
@@ -211,88 +230,95 @@ def maybe_send_trade_notification(
     telegram_chat_id_env: str,
 ) -> dict[str, Any]:
     symbol = str(state.get("symbol", "XAUUSD")).strip() or "XAUUSD"
-    latest_signal_time = str(state.get("latest_signal_time", "")).strip()
-    latest_signal = str(state.get("latest_signal", "")).strip().upper()
-    ready_signal = load_latest_trade_ready_signal(predictions_output)
-
     notification_state = load_notification_state(notification_state_output)
-    notification_state.setdefault("last_notified_signal_time", "")
-    notification_state.setdefault("last_notified_signal", "")
+    notification_state.setdefault("last_seen_event_key", "")
+    notification_state.setdefault("last_seen_event_action", "")
+    notification_state.setdefault("last_autopilot_enabled", None)
     notification_state.setdefault("last_notified_at", "")
     notification_state.setdefault("last_notification_status", "idle")
     notification_state.setdefault("last_notification_message", "")
+    notification_state.setdefault("last_notification_type", "")
 
-    if ready_signal is None:
-        notification_state["last_evaluated_signal_time"] = latest_signal_time
-        notification_state["last_evaluated_signal"] = latest_signal
-        notification_state["last_notification_status"] = "idle"
-        notification_state["last_notification_message"] = "No new trade-ready signal."
-        json_dump(notification_state, notification_state_output)
-        return notification_state
+    current_autopilot_enabled = bool(state.get("broker_trading_enabled", False))
+    last_autopilot_enabled = notification_state.get("last_autopilot_enabled", None)
+    latest_event_key = str(state.get("broker_latest_event_key", "")).strip()
+    latest_event_action = str(state.get("broker_latest_event_action", "")).strip().upper()
+    latest_event_time = str(state.get("broker_latest_event_time", "")).strip()
+    latest_event_direction = str(state.get("broker_latest_event_direction", "")).strip().upper()
+    latest_event_note = str(state.get("broker_latest_event_note", "")).strip()
+    latest_event_exit_reason = str(state.get("broker_latest_event_exit_reason", "")).strip().upper()
+    latest_event_realized_pnl_cash = float(state.get("broker_latest_event_realized_pnl_cash", 0.0) or 0.0)
+    broker_block_reason = str(state.get("broker_block_reason", "")).strip() or "No block reason supplied."
 
-    signal = str(ready_signal.get("signal", "")).strip().upper()
-    gate_status = str(ready_signal.get("gate_status", "")).strip().upper()
-    signal_time = str(ready_signal.get("signal_time", "")).strip()
-    signal_time_dt = parse_signal_time(signal_time)
-    last_notified_signal_time = str(notification_state.get("last_notified_signal_time", "")).strip()
-    last_notified_signal = str(notification_state.get("last_notified_signal", "")).strip().upper()
-    last_notified_signal_time_dt = parse_signal_time(last_notified_signal_time)
-
-    if signal not in {"LONG", "SHORT"} or gate_status != "READY" or not signal_time or signal_time_dt is None:
-        notification_state["last_evaluated_signal_time"] = latest_signal_time
-        notification_state["last_evaluated_signal"] = latest_signal
-        notification_state["last_notification_status"] = "idle"
-        notification_state["last_notification_message"] = "No new trade-ready signal."
-        json_dump(notification_state, notification_state_output)
-        return notification_state
-
-    if last_notified_signal_time_dt is not None and signal_time_dt < last_notified_signal_time_dt:
-        notification_state["last_evaluated_signal_time"] = latest_signal_time or signal_time
-        notification_state["last_evaluated_signal"] = latest_signal or signal
-        notification_state["last_notification_status"] = "idle"
-        notification_state["last_notification_message"] = "Latest trade-ready signal is older than the most recent notified signal."
-        json_dump(notification_state, notification_state_output)
-        return notification_state
-
-    if last_notified_signal_time_dt is not None and signal_time_dt == last_notified_signal_time_dt and last_notified_signal == signal:
-        notification_state["last_evaluated_signal_time"] = latest_signal_time or signal_time
-        notification_state["last_evaluated_signal"] = latest_signal or signal
-        notification_state["last_notification_status"] = "duplicate_skipped"
-        notification_state["last_notification_message"] = "Trade-ready signal was already notified."
-        json_dump(notification_state, notification_state_output)
-        return notification_state
-
-    already_notified = (
-        notification_state.get("last_notified_signal_time") == signal_time
-        and notification_state.get("last_notified_signal") == signal
-    )
-    if already_notified:
-        notification_state["last_evaluated_signal_time"] = signal_time
-        notification_state["last_evaluated_signal"] = signal
-        notification_state["last_notification_status"] = "duplicate_skipped"
-        notification_state["last_notification_message"] = "Trade-ready signal was already notified."
-        json_dump(notification_state, notification_state_output)
-        return notification_state
-
-    setup_score = float(ready_signal.get("setup_score", 0.0) or 0.0)
-    expected_value = float(ready_signal.get("expected_value", 0.0) or 0.0)
-    entry_price = float(ready_signal.get("entry_price", 0.0) or 0.0)
-    session_name = str(ready_signal.get("session_name", "")).strip() or "Active session"
-
+    event_type = ""
     title = "XAUUSD AI Bot"
-    subtitle = f"{symbol} {signal} setup ready"
-    message = (
-        f"Time {signal_time} | Entry {entry_price:.2f} | "
-        f"Score {setup_score:.1%} | EV {expected_value:.4f} | {session_name}"
-    )
-    telegram_message = (
-        f"{symbol} {signal} setup ready\n"
-        f"Time: {signal_time}\n"
-        f"Entry: {entry_price:.2f}\n"
-        f"Setup score: {setup_score:.1%}\n"
-        f"Expected value: {expected_value:.4f}\n"
-        f"Session: {session_name}"
-    )
+    subtitle = ""
+    message = ""
+    telegram_message = ""
+
+    if last_autopilot_enabled is None:
+        notification_state["last_autopilot_enabled"] = current_autopilot_enabled
+    elif last_autopilot_enabled and not current_autopilot_enabled:
+        event_type = "AUTOPILOT_DISABLED"
+        subtitle = f"{symbol} autopilot disabled"
+        message = broker_block_reason
+        telegram_message = (
+            f"{symbol} autopilot disabled\n"
+            f"Reason: {broker_block_reason}"
+        )
+        notification_state["last_autopilot_enabled"] = current_autopilot_enabled
+    elif (not last_autopilot_enabled) and current_autopilot_enabled:
+        event_type = "AUTOPILOT_RESTORED"
+        subtitle = f"{symbol} autopilot restored"
+        message = "Broker execution is enabled again."
+        telegram_message = (
+            f"{symbol} autopilot restored\n"
+            f"Broker execution is enabled again."
+        )
+        notification_state["last_autopilot_enabled"] = current_autopilot_enabled
+    elif latest_event_action in {"OPEN", "CLOSE", "BREAKEVEN"} and latest_event_key:
+        last_seen_event_key = str(notification_state.get("last_seen_event_key", "")).strip()
+        if latest_event_key != last_seen_event_key:
+            event_type = latest_event_action
+            notification_state["last_seen_event_key"] = latest_event_key
+            notification_state["last_seen_event_action"] = latest_event_action
+            if latest_event_action == "OPEN":
+                subtitle = f"{symbol} {latest_event_direction or 'TRADE'} opened"
+                message = f"Time {latest_event_time} | {latest_event_note or 'Broker demo trade opened.'}"
+                telegram_message = (
+                    f"{symbol} {latest_event_direction or 'TRADE'} opened\n"
+                    f"Time: {latest_event_time}\n"
+                    f"{latest_event_note or 'Broker demo trade opened.'}"
+                )
+            elif latest_event_action == "CLOSE":
+                subtitle = f"{symbol} {latest_event_direction or 'TRADE'} closed"
+                message = (
+                    f"Time {latest_event_time} | "
+                    f"Reason {latest_event_exit_reason or 'UNKNOWN'} | "
+                    f"PnL {latest_event_realized_pnl_cash:+.2f}"
+                )
+                telegram_message = (
+                    f"{symbol} {latest_event_direction or 'TRADE'} closed\n"
+                    f"Time: {latest_event_time}\n"
+                    f"Reason: {latest_event_exit_reason or 'UNKNOWN'}\n"
+                    f"PnL: {latest_event_realized_pnl_cash:+.2f}"
+                )
+            else:
+                subtitle = f"{symbol} {latest_event_direction or 'TRADE'} breakeven"
+                message = f"Time {latest_event_time} | Position protection moved after TP1."
+                telegram_message = (
+                    f"{symbol} {latest_event_direction or 'TRADE'} breakeven\n"
+                    f"Time: {latest_event_time}\n"
+                    f"Position protection moved after TP1."
+                )
+
+    if not event_type:
+        notification_state["last_notification_status"] = "idle"
+        notification_state["last_notification_message"] = "No new broker execution or autopilot state change."
+        notification_state["last_notification_type"] = ""
+        json_dump(notification_state, notification_state_output)
+        return notification_state
+
     print(f"ALERT: {subtitle} :: {message}")
     desktop_status, desktop_message = notify_desktop(title, subtitle, message)
 
@@ -320,18 +346,20 @@ def maybe_send_trade_notification(
         if part
     ) or message
 
-    notification_state["last_evaluated_signal_time"] = latest_signal_time or signal_time
-    notification_state["last_evaluated_signal"] = latest_signal or signal
     notification_state["last_notification_status"] = status_message
     notification_state["last_notification_message"] = detail_message
+    notification_state["last_notification_type"] = event_type
     notification_state["last_notification_channels"] = {
         "desktop": {"status": desktop_status, "message": desktop_message},
         "telegram": {"status": telegram_status, "message": telegram_message_status},
     }
+    notification_state["last_notified_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if delivered and event_type in {"OPEN", "CLOSE", "BREAKEVEN"}:
+        notification_state["last_notified_event_key"] = latest_event_key
     if delivered:
-        notification_state["last_notified_signal_time"] = signal_time
-        notification_state["last_notified_signal"] = signal
-        notification_state["last_notified_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        notification_state["last_notification_delivered"] = True
+    else:
+        notification_state["last_notification_delivered"] = False
     json_dump(notification_state, notification_state_output)
     return notification_state
 
@@ -387,8 +415,9 @@ def main() -> None:
                 )
                 state["notification_status"] = notification_state.get("last_notification_status", "idle")
                 state["notification_message"] = notification_state.get("last_notification_message", "")
-                state["last_notified_signal_time"] = notification_state.get("last_notified_signal_time", "")
-                state["last_notified_signal"] = notification_state.get("last_notified_signal", "")
+                state["notification_type"] = notification_state.get("last_notification_type", "")
+                state["last_seen_event_key"] = notification_state.get("last_seen_event_key", "")
+                state["last_autopilot_enabled"] = notification_state.get("last_autopilot_enabled", None)
                 json_dump(state, args.worker_state_output)
                 print(f"[{state['last_run_time']}] Updated report from MT5 exporter. latest={state['latest_signal']} trades={state['paper_trade_count']}")
                 last_mtime = current_mtime
